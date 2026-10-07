@@ -4,4 +4,6 @@ build/
 dist/
 *.spec
 reports/
+test-reports/
+dist-test/
 *.pyc
