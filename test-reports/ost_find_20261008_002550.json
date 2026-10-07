@@ -1,0 +1,117 @@
+{
+  "tool": "OST_find",
+  "version": "0.1.0",
+  "generated_at": "2026-10-07T22:25:50.124850+00:00",
+  "query": "example.com",
+  "query_type": "domain",
+  "findings": [
+    {
+      "source": "Search shortcut",
+      "title": "Bing",
+      "url": "https://www.bing.com/search?q=example.com",
+      "summary": "",
+      "category": "shortcut"
+    },
+    {
+      "source": "Search shortcut",
+      "title": "Google",
+      "url": "https://www.google.com/search?q=example.com",
+      "summary": "",
+      "category": "shortcut"
+    },
+    {
+      "source": "Search shortcut",
+      "title": "Reddit",
+      "url": "https://www.reddit.com/search/?q=example.com",
+      "summary": "",
+      "category": "shortcut"
+    },
+    {
+      "source": "Hacker News",
+      "title": "Example.com just launched the biggest redesign in decades",
+      "url": "https://www.debugbear.com/blog/example-dot-com-redesign-history",
+      "summary": "points: 356; author: jgx0",
+      "category": "discussion"
+    },
+    {
+      "source": "Hacker News",
+      "title": "Microsoft mishandling example.com",
+      "url": "https://tinyapps.org/blog/microsoft-mishandling-example-com.html",
+      "summary": "points: 249; author: mrled",
+      "category": "discussion"
+    },
+    {
+      "source": "Hacker News",
+      "title": "Ask HN: What does traffic to example.com look like?",
+      "url": "https://news.ycombinator.com/item?id=8057442",
+      "summary": "points: 68; author: mkr-hn",
+      "category": "discussion"
+    },
+    {
+      "source": "DuckDuckGo",
+      "title": "example.com - Wikipedia",
+      "url": "https://en.wikipedia.org/wiki/Example.com",
+      "summary": "",
+      "category": "search"
+    },
+    {
+      "source": "DuckDuckGo",
+      "title": "Example Domain",
+      "url": "https://www.example.com/",
+      "summary": "",
+      "category": "search"
+    },
+    {
+      "source": "DuckDuckGo",
+      "title": "Example.com - Example Domain",
+      "url": "https://www.ipaddress.com/website/example.com/",
+      "summary": "",
+      "category": "search"
+    },
+    {
+      "source": "GitHub users",
+      "title": "ArmagHeadon",
+      "url": "https://github.com/ArmagHeadon",
+      "summary": "type: User",
+      "category": "profile"
+    },
+    {
+      "source": "GitHub users",
+      "title": "admin-example-com",
+      "url": "https://github.com/admin-example-com",
+      "summary": "type: Organization",
+      "category": "profile"
+    },
+    {
+      "source": "GitHub users",
+      "title": "ma99R",
+      "url": "https://github.com/ma99R",
+      "summary": "type: User",
+      "category": "profile"
+    },
+    {
+      "source": "GitHub repositories",
+      "title": "rodrigosf672/measure-loading-times",
+      "url": "https://github.com/rodrigosf672/measure-loading-times",
+      "summary": "Simulates 1–5 concurrent users with Playwright to measure and report average page load times for performance testing, using google.com page as example.",
+      "category": "code"
+    },
+    {
+      "source": "GitHub repositories",
+      "title": "thanhndv212/figaroh-examples",
+      "url": "https://github.com/thanhndv212/figaroh-examples",
+      "summary": "Comprehensive examples and tutorials for the [FIGAROH-PLUS](https://github.com/thanhndv212/figaroh-plus) library",
+      "category": "code"
+    },
+    {
+      "source": "GitHub repositories",
+      "title": "hoford/RemoteCompose-Examples",
+      "url": "https://github.com/hoford/RemoteCompose-Examples",
+      "summary": "Examples of remoteCompose documents ",
+      "category": "code"
+    }
+  ],
+  "errors": [
+    "Domain intelligence: ReadTimeout: HTTPSConnectionPool(host='crt.sh', port=443): Read timed out. (read timeout=12)"
+  ]
+}
