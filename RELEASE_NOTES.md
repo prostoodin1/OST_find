@@ -1,7 +1,13 @@
-# OST_find 0.1.0
+# OST_find 0.2.0
 
-First public MVP release.
+Windows GUI and broader public-web search.
 
-The Windows executable runs without a separate Python installation. It searches public web, developer, discussion, domain, and profile sources, then writes inspectable JSON and Markdown reports.
+- Search repeatedly without reopening the application.
+- Click normalized destination links directly in the results window.
+- See a gray input example and Russian help with supported query formats.
+- Search DuckDuckGo, Bing, GitHub, Hacker News, Wikipedia, Stack Overflow and type-specific public sources.
+- Keep JSON and Markdown reports for every query.
+
+The application searches public sources. It cannot access private pages or literally index every page on the internet.
 
 No API keys are required. The tool does not bypass authentication or access private databases.

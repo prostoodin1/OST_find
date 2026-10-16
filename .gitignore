@@ -2,6 +2,8 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+dist-portable/
+portable-test/
 *.spec
 reports/
 test-reports/

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import builtins
 import hashlib
 import html
 import ipaddress
@@ -8,24 +10,39 @@ import json
 import re
 import socket
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import time
+import webbrowser
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 import requests
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from rich.table import Table
 
 
 APP_NAME = "OST_find"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} public-source research tool"
 DEFAULT_TIMEOUT = 12
+
+
+class Console:
+    """Tiny ANSI-friendly console wrapper that keeps the packaged app dependency-light."""
+
+    _markup = re.compile(r"\[/?(?:bold|dim|cyan|green|yellow|red|magenta)(?: [^\]]+)?\]")
+
+    @classmethod
+    def _plain(cls, value: object) -> str:
+        return cls._markup.sub("", str(value))
+
+    def print(self, *values: object) -> None:
+        builtins.print(*(self._plain(value) for value in values))
+
+    def input(self, prompt: str) -> str:
+        return builtins.input(self._plain(prompt))
 
 
 @dataclass(slots=True)
@@ -68,6 +85,33 @@ def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", value))).strip()
 
 
+def normalize_result_url(raw_url: str) -> str:
+    """Resolve known search-engine redirects and remove common tracking parameters."""
+
+    url = html.unescape(raw_url).strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        url = unquote(params.get("uddg", [url])[0])
+        parsed = urlparse(url)
+    elif parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/a"):
+        encoded = params.get("u", [""])[0]
+        if encoded.startswith("a1"):
+            try:
+                payload = encoded[2:]
+                url = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("utf-8")
+                parsed = urlparse(url)
+            except (ValueError, UnicodeDecodeError):
+                pass
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    tracking = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"}
+    clean_query = [(key, value) for key, values in parse_qs(parsed.query, keep_blank_values=True).items() for value in values if key.casefold() not in tracking]
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(clean_query, doseq=True), ""))
+
+
 def search_duckduckgo(query: str, limit: int) -> list[Finding]:
     response = _session().get(
         "https://html.duckduckgo.com/html/",
@@ -81,19 +125,85 @@ def search_duckduckgo(query: str, limit: int) -> list[Finding]:
     )
     findings: list[Finding] = []
     for raw_url, raw_title in pattern.findall(response.text):
-        url = html.unescape(raw_url)
-        if url.startswith("//"):
-            url = "https:" + url
-        parsed = urlparse(url)
-        if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
-            encoded = parse_qs(parsed.query).get("uddg", [""])[0]
-            if encoded:
-                url = unquote(encoded)
+        url = normalize_result_url(raw_url)
         title = _clean_text(raw_title)
-        if title and url.startswith(("http://", "https://")):
+        if title and url:
             findings.append(Finding("DuckDuckGo", title, url, category="search"))
         if len(findings) >= limit:
             break
+    return findings
+
+
+def search_bing(query: str, limit: int) -> list[Finding]:
+    response = _session().get(
+        "https://www.bing.com/search",
+        params={"q": query, "count": min(limit, 20), "setlang": "en-US"},
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) OST_find/0.2"},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    block_pattern = re.compile(r'<li[^>]+class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>', re.IGNORECASE | re.DOTALL)
+    link_pattern = re.compile(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+    summary_pattern = re.compile(r'<p[^>]*>(.*?)</p>', re.IGNORECASE | re.DOTALL)
+    findings: list[Finding] = []
+    for block in block_pattern.findall(response.text):
+        match = link_pattern.search(block)
+        if not match:
+            continue
+        url = normalize_result_url(match.group(1))
+        title = _clean_text(match.group(2))
+        summary_match = summary_pattern.search(block)
+        summary = _clean_text(summary_match.group(1))[:400] if summary_match else ""
+        if title and url:
+            findings.append(Finding("Bing", title, url, summary, "search"))
+        if len(findings) >= limit:
+            break
+    return findings
+
+
+def search_wikipedia(query: str, limit: int) -> list[Finding]:
+    language = "ru" if re.search(r"[А-Яа-яЁё]", query) else "en"
+    response = _session().get(
+        f"https://{language}.wikipedia.org/w/api.php",
+        params={"action": "query", "list": "search", "srsearch": query, "srlimit": min(limit, 20), "format": "json", "utf8": 1},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    findings: list[Finding] = []
+    for item in response.json().get("query", {}).get("search", [])[:limit]:
+        title = str(item.get("title") or "Wikipedia")
+        findings.append(
+            Finding(
+                f"Wikipedia ({language})",
+                title,
+                f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}",
+                _clean_text(str(item.get("snippet") or ""))[:400],
+                "reference",
+            )
+        )
+    return findings
+
+
+def search_stackoverflow(query: str, limit: int) -> list[Finding]:
+    response = _session().get(
+        "https://api.stackexchange.com/2.3/search/advanced",
+        params={"q": query, "site": "stackoverflow", "sort": "relevance", "order": "desc", "pagesize": min(limit, 20)},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    findings: list[Finding] = []
+    for item in response.json().get("items", [])[:limit]:
+        url = normalize_result_url(str(item.get("link") or ""))
+        if url:
+            findings.append(
+                Finding(
+                    "Stack Overflow",
+                    _clean_text(str(item.get("title") or "Stack Overflow question")),
+                    url,
+                    f"score: {item.get('score', 0)}; answers: {item.get('answer_count', 0)}",
+                    "discussion",
+                )
+            )
     return findings
 
 
@@ -245,12 +355,20 @@ def search_links(query: str, query_type: str) -> list[Finding]:
     return links
 
 
-def run_search(query: str, limit: int, console: Console) -> tuple[str, list[Finding], list[str]]:
+def run_search(
+    query: str,
+    limit: int,
+    console: Console | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+) -> tuple[str, list[Finding], list[str]]:
     query_type = detect_query_type(query)
     jobs: dict[str, Callable[[], list[Finding]]] = {
         "DuckDuckGo": lambda: search_duckduckgo(query, limit),
+        "Bing": lambda: search_bing(query, limit),
         "GitHub": lambda: search_github(query, limit),
         "Hacker News": lambda: search_hacker_news(query, limit),
+        "Wikipedia": lambda: search_wikipedia(query, limit),
+        "Stack Overflow": lambda: search_stackoverflow(query, limit),
     }
     if query_type == "domain":
         jobs["Domain intelligence"] = lambda: search_domain_intel(query, limit)
@@ -259,23 +377,36 @@ def run_search(query: str, limit: int, console: Console) -> tuple[str, list[Find
 
     findings = search_links(query, query_type)
     errors: list[str] = []
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold cyan]{task.description}"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task_id = progress.add_task("Searching public sources", total=len(jobs))
-        with ThreadPoolExecutor(max_workers=min(5, len(jobs))) as pool:
-            futures = {pool.submit(job): name for name, job in jobs.items()}
-            for future in as_completed(futures):
-                name = futures[future]
+    with ThreadPoolExecutor(max_workers=min(7, len(jobs))) as pool:
+        pending = {pool.submit(job): name for name, job in jobs.items()}
+        completed = 0
+        spinner = "|/-\\"
+        frame = 0
+        while pending:
+            done, _ = wait(pending, timeout=0.12, return_when=FIRST_COMPLETED)
+            if not done:
+                if progress_callback:
+                    progress_callback("Searching public web", completed, len(jobs))
+                elif console:
+                    builtins.print(
+                        f"\r{spinner[frame % len(spinner)]} Searching public web [{completed}/{len(jobs)}]",
+                        end="",
+                        flush=True,
+                    )
+                frame += 1
+                continue
+            for future in done:
+                name = pending.pop(future)
                 try:
                     findings.extend(future.result())
                 except Exception as exc:  # network failures should not abort the report
                     errors.append(f"{name}: {type(exc).__name__}: {exc}")
-                progress.advance(task_id)
-                progress.update(task_id, description=f"Checked {name}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(f"Checked {name}", completed, len(jobs))
+                elif console:
+                    builtins.print(f"\r✓ Checked {name} [{completed}/{len(jobs)}]".ljust(72))
+            time.sleep(0.03)
 
     unique: dict[tuple[str, str], Finding] = {}
     for item in findings:
@@ -286,7 +417,7 @@ def run_search(query: str, limit: int, console: Console) -> tuple[str, list[Find
 
 def save_reports(query: str, query_type: str, findings: list[Finding], errors: list[str], output_dir: Path) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     json_path = output_dir / f"ost_find_{stamp}.json"
     md_path = output_dir / f"ost_find_{stamp}.md"
     payload = {
@@ -311,7 +442,7 @@ def save_reports(query: str, query_type: str, findings: list[Finding], errors: l
         "",
     ]
     for item in findings:
-        lines.extend([f"### {item.title}", "", f"- Source: {item.source}", f"- URL: {item.url}"])
+        lines.extend([f"### {item.title}", "", f"- Source: {item.source}", f"- URL: <{item.url}>"])
         if item.summary:
             lines.append(f"- Summary: {item.summary}")
         lines.append("")
@@ -322,20 +453,193 @@ def save_reports(query: str, query_type: str, findings: list[Finding], errors: l
 
 
 def display_findings(findings: list[Finding], console: Console) -> None:
-    table = Table(title=f"{APP_NAME} results", header_style="bold magenta", show_lines=True)
-    table.add_column("Source", style="cyan", no_wrap=True)
-    table.add_column("Title", style="bold")
-    table.add_column("URL", overflow="fold")
-    for item in findings:
-        table.add_row(item.source, item.title, item.url)
-    console.print(table)
+    console.print(f"\n{APP_NAME} results ({len(findings)})")
+    console.print("=" * 72)
+    for index, item in enumerate(findings, start=1):
+        console.print(f"{index:02}. [{item.source}] {item.title}")
+        console.print(f"    {item.url}")
+        if item.summary:
+            console.print(f"    {item.summary}")
+
+
+def default_output_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "reports"
+    return Path("reports")
+
+
+def launch_gui(limit: int, output_dir: Path) -> int:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    root = tk.Tk()
+    root.title(f"{APP_NAME} {APP_VERSION}")
+    root.geometry("980x720")
+    root.minsize(760, 560)
+    root.configure(bg="#101521")
+
+    colors = {"bg": "#101521", "panel": "#171e2d", "text": "#edf2ff", "muted": "#7f8da8", "accent": "#66d9ef", "green": "#7ee787"}
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure("TFrame", background=colors["bg"])
+    style.configure("Panel.TFrame", background=colors["panel"])
+    style.configure("TLabel", background=colors["bg"], foreground=colors["text"], font=("Segoe UI", 10))
+    style.configure("Title.TLabel", background=colors["bg"], foreground=colors["text"], font=("Segoe UI Semibold", 22))
+    style.configure("Muted.TLabel", background=colors["bg"], foreground=colors["muted"], font=("Segoe UI", 9))
+    style.configure("Accent.TButton", font=("Segoe UI Semibold", 10), padding=(16, 9))
+
+    main_frame = ttk.Frame(root, padding=22)
+    main_frame.pack(fill="both", expand=True)
+    ttk.Label(main_frame, text="OST Finder", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(main_frame, text="Поиск по открытому вебу и публичным источникам", style="Muted.TLabel").pack(anchor="w", pady=(0, 16))
+
+    search_row = ttk.Frame(main_frame)
+    search_row.pack(fill="x")
+    placeholder = "Например: username, example.com, email@example.com или тема поиска"
+    query_var = tk.StringVar(value=placeholder)
+    entry = tk.Entry(
+        search_row,
+        textvariable=query_var,
+        font=("Segoe UI", 11),
+        bg=colors["panel"],
+        fg=colors["muted"],
+        insertbackground=colors["text"],
+        relief="flat",
+        highlightthickness=1,
+        highlightbackground="#2b354b",
+        highlightcolor=colors["accent"],
+    )
+    entry.pack(side="left", fill="x", expand=True, ipady=10)
+
+    def clear_placeholder(_event: object | None = None) -> None:
+        if query_var.get() == placeholder:
+            query_var.set("")
+            entry.configure(fg=colors["text"])
+
+    def restore_placeholder(_event: object | None = None) -> None:
+        if not query_var.get().strip():
+            query_var.set(placeholder)
+            entry.configure(fg=colors["muted"])
+
+    entry.bind("<FocusIn>", clear_placeholder)
+    entry.bind("<FocusOut>", restore_placeholder)
+
+    search_button = ttk.Button(search_row, text="Найти", style="Accent.TButton")
+    search_button.pack(side="left", padx=(10, 0))
+
+    def show_help() -> None:
+        messagebox.showinfo(
+            "Как пользоваться OST Finder",
+            "Что можно вводить:\n\n"
+            "• ник: @username или username\n"
+            "• сайт: example.com или https://example.com\n"
+            "• email: name@example.com\n"
+            "• IP-адрес: 8.8.8.8\n"
+            "• обычный вопрос или тему: open source music player\n\n"
+            "Нажмите на синюю ссылку, чтобы открыть результат в браузере. "
+            "После поиска окно остаётся открытым — просто введите следующий запрос.\n\n"
+            "Программа ищет по общедоступному вебу и публичным API. Она не видит закрытые страницы и не может буквально проиндексировать весь интернет.",
+        )
+
+    ttk.Button(search_row, text="Помощь", command=show_help).pack(side="left", padx=(8, 0))
+
+    progress = ttk.Progressbar(main_frame, mode="indeterminate")
+    progress.pack(fill="x", pady=(14, 5))
+    status_var = tk.StringVar(value="Введите запрос и нажмите «Найти»")
+    ttk.Label(main_frame, textvariable=status_var, style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+
+    result_frame = ttk.Frame(main_frame, style="Panel.TFrame")
+    result_frame.pack(fill="both", expand=True)
+    results = tk.Text(
+        result_frame,
+        wrap="word",
+        bg=colors["panel"],
+        fg=colors["text"],
+        insertbackground=colors["text"],
+        relief="flat",
+        padx=16,
+        pady=14,
+        font=("Segoe UI", 10),
+        state="disabled",
+    )
+    scrollbar = ttk.Scrollbar(result_frame, orient="vertical", command=results.yview)
+    results.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side="right", fill="y")
+    results.pack(fill="both", expand=True)
+    results.tag_configure("title", font=("Segoe UI Semibold", 11), foreground=colors["text"])
+    results.tag_configure("source", foreground=colors["green"])
+    results.tag_configure("summary", foreground="#aeb9cc")
+    results.tag_configure("empty", foreground=colors["muted"], justify="center")
+
+    def render(findings: list[Finding], query_type: str, errors: list[str], report_paths: tuple[Path, Path]) -> None:
+        results.configure(state="normal")
+        results.delete("1.0", "end")
+        if not findings:
+            results.insert("end", "Ничего не найдено. Попробуйте более точный или более общий запрос.", "empty")
+        for index, item in enumerate(findings, 1):
+            results.insert("end", f"{index:02}. {item.title}\n", "title")
+            results.insert("end", f"{item.source}\n", "source")
+            tag = f"url_{index}"
+            results.insert("end", item.url + "\n", tag)
+            results.tag_configure(tag, foreground=colors["accent"], underline=True)
+            results.tag_bind(tag, "<Enter>", lambda _event: results.configure(cursor="hand2"))
+            results.tag_bind(tag, "<Leave>", lambda _event: results.configure(cursor=""))
+            results.tag_bind(tag, "<Button-1>", lambda _event, url=item.url: webbrowser.open(url))
+            if item.summary:
+                results.insert("end", item.summary + "\n", "summary")
+            results.insert("end", "\n")
+        results.configure(state="disabled")
+        progress.stop()
+        search_button.configure(state="normal")
+        status = f"Готово: {len(findings)} результатов · тип: {query_type} · отчёт: {report_paths[1].name}"
+        if errors:
+            status += f" · недоступно источников: {len(errors)}"
+        status_var.set(status)
+        entry.focus_set()
+        entry.selection_range(0, "end")
+
+    def fail(message: str) -> None:
+        progress.stop()
+        search_button.configure(state="normal")
+        status_var.set("Ошибка поиска")
+        messagebox.showerror("OST Finder", message)
+
+    def begin_search(_event: object | None = None) -> None:
+        query = query_var.get().strip()
+        if not query or query == placeholder:
+            messagebox.showwarning("OST Finder", "Введите ник, домен, email, IP-адрес или обычную тему поиска.")
+            entry.focus_set()
+            return
+        search_button.configure(state="disabled")
+        progress.start(12)
+        status_var.set("Ищу по открытому интернету…")
+
+        def on_progress(name: str, completed: int, total: int) -> None:
+            root.after(0, status_var.set, f"{name}: {completed}/{total}")
+
+        def worker() -> None:
+            try:
+                query_type, findings, errors = run_search(query, limit, progress_callback=on_progress)
+                report_paths = save_reports(query, query_type, findings, errors, output_dir)
+                root.after(0, render, findings, query_type, errors, report_paths)
+            except Exception as exc:
+                root.after(0, fail, f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    search_button.configure(command=begin_search)
+    entry.bind("<Return>", begin_search)
+    root.after(150, entry.focus_set)
+    root.mainloop()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Public-source research from the terminal.")
     parser.add_argument("query", nargs="?", help="Username, domain, email or search phrase")
     parser.add_argument("--limit", type=int, default=8, help="Maximum results per source (default: 8)")
-    parser.add_argument("--output", type=Path, default=Path("reports"), help="Report directory")
+    parser.add_argument("--output", type=Path, default=None, help="Report directory")
+    parser.add_argument("--cli", action="store_true", help="Use the terminal interface even when no query is provided")
     parser.add_argument("--no-pause", action="store_true", help="Do not wait before closing an interactive Windows session")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     return parser
@@ -343,22 +647,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    output_dir = args.output or default_output_dir()
+    limit = max(1, min(args.limit, 25))
+    if not args.query and not args.cli:
+        return launch_gui(limit, output_dir)
     console = Console()
-    console.print(
-        Panel.fit(
-            f"[bold cyan]{APP_NAME}[/bold cyan] [dim]v{APP_VERSION}[/dim]\n"
-            "Searches only public sources. Use legally and respect privacy.",
-            border_style="cyan",
-        )
-    )
+    console.print("+" + "-" * 62 + "+")
+    console.print(f"| {APP_NAME} v{APP_VERSION}".ljust(63) + "|")
+    console.print("| Searches public sources. Use legally and respect privacy.".ljust(63) + "|")
+    console.print("+" + "-" * 62 + "+")
     query = args.query or console.input("[bold]What should I search for?[/bold] ").strip()
     if not query:
         console.print("[red]A search query is required.[/red]")
         return 2
-    limit = max(1, min(args.limit, 25))
     query_type, findings, errors = run_search(query, limit, console)
     display_findings(findings, console)
-    json_path, md_path = save_reports(query, query_type, findings, errors, args.output)
+    json_path, md_path = save_reports(query, query_type, findings, errors, output_dir)
     console.print(f"\n[green]Saved:[/green] {json_path.resolve()}")
     console.print(f"[green]Saved:[/green] {md_path.resolve()}")
     if errors:

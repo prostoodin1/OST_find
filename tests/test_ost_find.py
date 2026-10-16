@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 
-from ost_find import Finding, detect_query_type, normalize_domain, save_reports
+import base64
+
+from ost_find import Finding, detect_query_type, normalize_domain, normalize_result_url, save_reports
 
 
 def test_detect_query_types():
@@ -14,6 +16,22 @@ def test_detect_query_types():
 
 def test_normalize_domain():
     assert normalize_domain("HTTPS://Example.COM/path") == "example.com"
+
+
+def test_normalize_duckduckgo_result_url():
+    redirect = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage%3Futm_source%3Dtest%26id%3D7"
+    assert normalize_result_url(redirect) == "https://example.com/page?id=7"
+
+
+def test_normalize_bing_result_url():
+    destination = "https://example.com/useful-page"
+    encoded = base64.urlsafe_b64encode(destination.encode()).decode().rstrip("=")
+    redirect = f"https://www.bing.com/ck/a?u=a1{encoded}&ntb=1"
+    assert normalize_result_url(redirect) == destination
+
+
+def test_reject_non_web_result_url():
+    assert normalize_result_url("javascript:alert(1)") == ""
 
 
 def test_save_reports(tmp_path: Path):
