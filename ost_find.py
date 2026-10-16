@@ -7,12 +7,11 @@ import hashlib
 import html
 import ipaddress
 import json
+import os
 import re
 import socket
 import sys
-import threading
 import time
-import webbrowser
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -24,7 +23,7 @@ import requests
 
 
 APP_NAME = "OST_find"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} public-source research tool"
 DEFAULT_TIMEOUT = 12
 
@@ -43,6 +42,12 @@ class Console:
 
     def input(self, prompt: str) -> str:
         return builtins.input(self._plain(prompt))
+
+    def dim(self, value: str) -> None:
+        if getattr(sys.stdout, "isatty", lambda: False)():
+            builtins.print(f"\x1b[2;90m{value}\x1b[0m")
+        else:
+            builtins.print(value)
 
 
 @dataclass(slots=True)
@@ -66,7 +71,9 @@ def detect_query_type(query: str) -> str:
         return "ip"
     except ValueError:
         pass
-    if re.fullmatch(r"@?[A-Za-z0-9_.-]{2,39}", value):
+    if re.fullmatch(r"@[A-Za-z0-9_.-]{2,39}", value) or (
+        re.fullmatch(r"[A-Za-z0-9_.-]{2,39}", value) and any(character in value for character in "_.-")
+    ):
         return "username"
     return "text"
 
@@ -207,26 +214,50 @@ def search_stackoverflow(query: str, limit: int) -> list[Finding]:
     return findings
 
 
-def search_github(query: str, limit: int) -> list[Finding]:
+def search_gitlab(query: str, limit: int) -> list[Finding]:
+    response = _session().get(
+        "https://gitlab.com/api/v4/projects",
+        params={"search": query.lstrip("@"), "simple": "true", "per_page": min(limit, 20), "order_by": "last_activity_at"},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    findings: list[Finding] = []
+    for item in response.json()[:limit]:
+        url = normalize_result_url(str(item.get("web_url") or ""))
+        if url:
+            findings.append(
+                Finding(
+                    "GitLab projects",
+                    str(item.get("path_with_namespace") or item.get("name") or "GitLab project"),
+                    url,
+                    _clean_text(str(item.get("description") or ""))[:240],
+                    "code",
+                )
+            )
+    return findings
+
+
+def search_github(query: str, limit: int, include_users: bool = True) -> list[Finding]:
     session = _session()
     findings: list[Finding] = []
     user_query = query.lstrip("@").strip()
-    user_response = session.get(
-        "https://api.github.com/search/users",
-        params={"q": user_query, "per_page": min(limit, 10)},
-        timeout=DEFAULT_TIMEOUT,
-    )
-    user_response.raise_for_status()
-    for item in user_response.json().get("items", [])[:limit]:
-        findings.append(
-            Finding(
-                "GitHub users",
-                item.get("login", "GitHub user"),
-                item.get("html_url", ""),
-                f"type: {item.get('type', 'User')}",
-                "profile",
-            )
+    if include_users:
+        user_response = session.get(
+            "https://api.github.com/search/users",
+            params={"q": user_query, "per_page": min(limit, 10)},
+            timeout=DEFAULT_TIMEOUT,
         )
+        user_response.raise_for_status()
+        for item in user_response.json().get("items", [])[:limit]:
+            findings.append(
+                Finding(
+                    "GitHub users",
+                    item.get("login", "GitHub user"),
+                    item.get("html_url", ""),
+                    f"type: {item.get('type', 'User')}",
+                    "profile",
+                )
+            )
     repo_response = session.get(
         "https://api.github.com/search/repositories",
         params={"q": query, "per_page": min(limit, 10), "sort": "updated"},
@@ -314,6 +345,126 @@ def search_domain_intel(query: str, limit: int) -> list[Finding]:
                         return findings
     except (requests.RequestException, ValueError):
         pass
+    dns_types = ("A", "AAAA", "MX", "NS", "TXT")
+    for record_type in dns_types:
+        record_count = 0
+        try:
+            dns_response = _session().get(
+                "https://dns.google/resolve",
+                params={"name": domain, "type": record_type},
+                timeout=DEFAULT_TIMEOUT,
+            )
+            if not dns_response.ok:
+                continue
+            for answer in dns_response.json().get("Answer", []):
+                data = str(answer.get("data") or "").strip()
+                if not data:
+                    continue
+                findings.append(
+                    Finding(
+                        "DNS",
+                        f"{record_type} record: {data}",
+                        f"https://dns.google/query?name={quote_plus(domain)}&type={record_type}",
+                        f"TTL: {answer.get('TTL', 'unknown')}",
+                        "infrastructure",
+                    )
+                )
+                record_count += 1
+                if record_count >= min(limit, 2):
+                    break
+        except (requests.RequestException, ValueError):
+            continue
+    try:
+        security_url = f"https://{domain}/.well-known/security.txt"
+        security_response = _session().get(security_url, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+        if security_response.ok and "contact:" in security_response.text.casefold():
+            contact = next(
+                (line.strip() for line in security_response.text.splitlines() if line.casefold().startswith("contact:")),
+                "Published security contact",
+            )
+            findings.append(Finding("security.txt", f"Security contact for {domain}", security_url, contact[:400], "security"))
+    except requests.RequestException:
+        pass
+    return findings
+
+
+def search_urlscan(query: str, query_type: str, limit: int) -> list[Finding]:
+    if query_type not in {"domain", "ip"}:
+        return []
+    value = normalize_domain(query) if query_type == "domain" else query.strip()
+    response = _session().get(
+        "https://urlscan.io/api/v1/search/",
+        params={"q": f"{query_type}:{value}", "size": min(limit * 5, 100)},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    findings: list[Finding] = []
+    for item in response.json().get("results", []):
+        task = item.get("task") or {}
+        page = item.get("page") or {}
+        if query_type == "domain":
+            page_domain = str(page.get("domain") or "").casefold().rstrip(".")
+            page_url_domain = urlparse(str(page.get("url") or "")).hostname or ""
+            if not any(
+                candidate == value or candidate.endswith("." + value)
+                for candidate in (page_domain, page_url_domain.casefold())
+            ):
+                continue
+        elif str(page.get("ip") or "") != value:
+            continue
+        scan_id = str(task.get("uuid") or "").strip()
+        result_url = f"https://urlscan.io/result/{scan_id}/" if scan_id else normalize_result_url(str(item.get("result") or ""))
+        if result_url:
+            page_url = str(page.get("url") or task.get("url") or "unknown")
+            submitted_url = str(task.get("url") or "")
+            summary = f"page: {page_url}; IP: {page.get('ip') or 'unknown'}"
+            if submitted_url and submitted_url != page_url:
+                summary += f"; submitted: {submitted_url}"
+            findings.append(
+                Finding(
+                    "urlscan.io",
+                    str(page.get("title") or page.get("domain") or task.get("url") or "Public URL scan"),
+                    result_url,
+                    summary,
+                    "security",
+                )
+            )
+            if len(findings) >= limit:
+                break
+    return findings
+
+
+def search_ip_intel(query: str, limit: int) -> list[Finding]:
+    del limit
+    address = query.strip()
+    findings: list[Finding] = []
+    response = _session().get(f"https://rdap.org/ip/{quote_plus(address)}", timeout=DEFAULT_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    summary = "; ".join(
+        part
+        for part in (
+            f"name: {data.get('name')}" if data.get("name") else "",
+            f"country: {data.get('country')}" if data.get("country") else "",
+            f"type: {data.get('type')}" if data.get("type") else "",
+            f"range: {data.get('startAddress')} - {data.get('endAddress')}" if data.get("startAddress") else "",
+        )
+        if part
+    )
+    findings.append(Finding("RDAP IP", address, f"https://rdap.org/ip/{address}", summary, "infrastructure"))
+    try:
+        hostname, aliases, _ = socket.gethostbyaddr(address)
+        findings.append(
+            Finding(
+                "Reverse DNS",
+                hostname,
+                f"https://dns.google/query?name={quote_plus(address)}&type=PTR",
+                f"aliases: {', '.join(aliases) if aliases else 'none'}",
+                "infrastructure",
+            )
+        )
+    except (socket.herror, socket.gaierror):
+        pass
     return findings
 
 
@@ -344,6 +495,16 @@ def search_links(query: str, query_type: str) -> list[Finding]:
         Finding("Search shortcut", "Google", f"https://www.google.com/search?q={encoded}", category="shortcut"),
         Finding("Search shortcut", "Reddit", f"https://www.reddit.com/search/?q={encoded}", category="shortcut"),
     ]
+    if query_type == "domain":
+        domain = normalize_domain(query)
+        links.append(
+            Finding(
+                "Archive shortcut",
+                "Wayback Machine history",
+                f"https://web.archive.org/web/*/{quote(domain, safe='.')}",
+                category="archive",
+            )
+        )
     if query_type == "username":
         username = quote_plus(query.lstrip("@"))
         links.extend(
@@ -365,13 +526,30 @@ def run_search(
     jobs: dict[str, Callable[[], list[Finding]]] = {
         "DuckDuckGo": lambda: search_duckduckgo(query, limit),
         "Bing": lambda: search_bing(query, limit),
-        "GitHub": lambda: search_github(query, limit),
-        "Hacker News": lambda: search_hacker_news(query, limit),
-        "Wikipedia": lambda: search_wikipedia(query, limit),
-        "Stack Overflow": lambda: search_stackoverflow(query, limit),
     }
+    if query_type == "text":
+        jobs.update(
+            {
+                "GitHub": lambda: search_github(query, limit, include_users=False),
+                "GitLab": lambda: search_gitlab(query, limit),
+                "Hacker News": lambda: search_hacker_news(query, limit),
+                "Wikipedia": lambda: search_wikipedia(query, limit),
+                "Stack Overflow": lambda: search_stackoverflow(query, limit),
+            }
+        )
+    elif query_type == "username":
+        jobs["GitHub"] = lambda: search_github(query, limit, include_users=True)
+        jobs["GitLab"] = lambda: search_gitlab(query, limit)
+    elif query_type == "domain":
+        jobs["GitHub"] = lambda: search_github(query, limit, include_users=False)
+        jobs["Hacker News"] = lambda: search_hacker_news(query, limit)
+        jobs["Wikipedia"] = lambda: search_wikipedia(query, limit)
     if query_type == "domain":
         jobs["Domain intelligence"] = lambda: search_domain_intel(query, limit)
+        jobs["urlscan.io"] = lambda: search_urlscan(query, query_type, limit)
+    if query_type == "ip":
+        jobs["IP intelligence"] = lambda: search_ip_intel(query, limit)
+        jobs["urlscan.io"] = lambda: search_urlscan(query, query_type, limit)
     if query_type == "email":
         jobs["Public email profile"] = lambda: search_email_profile(query, limit)
 
@@ -468,7 +646,63 @@ def default_output_dir() -> Path:
     return Path("reports")
 
 
+def print_help(console: Console) -> None:
+    console.print("\nHow to search:")
+    console.print("  @username             public profiles and code accounts")
+    console.print("  example.com           web, DNS, RDAP, certificates, urlscan and archives")
+    console.print("  name@example.com      public web mentions and Gravatar")
+    console.print("  8.8.8.8               RDAP, reverse DNS, urlscan and web mentions")
+    console.print("  open source player    an ordinary topic across public web sources")
+    console.print("\nCommands: help, clear, exit")
+    console.print("Only public sources are queried. Closed pages, leaked databases and authentication bypass are not used.\n")
+
+
+def print_banner(console: Console) -> None:
+    console.print("+" + "-" * 70 + "+")
+    console.print(f"| {APP_NAME} v{APP_VERSION} · public OSINT terminal".ljust(71) + "|")
+    console.print("| Repeated search · real destination URLs · reports after every query".ljust(71) + "|")
+    console.print("+" + "-" * 70 + "+")
+
+
+def execute_query(query: str, limit: int, output_dir: Path, console: Console) -> None:
+    query_type, findings, errors = run_search(query, limit, console)
+    display_findings(findings, console)
+    json_path, md_path = save_reports(query, query_type, findings, errors, output_dir)
+    console.print(f"\nSaved: {json_path.resolve()}")
+    console.print(f"Saved: {md_path.resolve()}")
+    if errors:
+        console.print(f"{len(errors)} source(s) were unavailable; details are in the report.")
+
+
+def interactive_loop(limit: int, output_dir: Path, console: Console) -> int:
+    print_banner(console)
+    console.dim("Hint: enter @username, example.com, email@example.com, an IP address or any topic. Type help for examples.")
+    while True:
+        try:
+            query = console.input("\nOST_find> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\nClosing OST Finder.")
+            return 0
+        command = query.casefold()
+        if command in {"exit", "quit", "q", "выход"}:
+            console.print("Closing OST Finder.")
+            return 0
+        if command in {"help", "?", "помощь"}:
+            print_help(console)
+            continue
+        if command in {"clear", "cls", "очистить"}:
+            os.system("cls" if os.name == "nt" else "clear")
+            print_banner(console)
+            continue
+        if not query:
+            console.dim("Enter a search value or type help. The program stays open after every search.")
+            continue
+        execute_query(query, limit, output_dir, console)
+
+
 def launch_gui(limit: int, output_dir: Path) -> int:
+    """Legacy GUI code retained only as historical source text; terminal mode is the product interface.
+
     import tkinter as tk
     from tkinter import messagebox, ttk
 
@@ -632,6 +866,7 @@ def launch_gui(limit: int, output_dir: Path) -> int:
     root.after(150, entry.focus_set)
     root.mainloop()
     return 0
+    """
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -639,8 +874,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("query", nargs="?", help="Username, domain, email or search phrase")
     parser.add_argument("--limit", type=int, default=8, help="Maximum results per source (default: 8)")
     parser.add_argument("--output", type=Path, default=None, help="Report directory")
-    parser.add_argument("--cli", action="store_true", help="Use the terminal interface even when no query is provided")
-    parser.add_argument("--no-pause", action="store_true", help="Do not wait before closing an interactive Windows session")
+    parser.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-pause", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     return parser
 
@@ -649,26 +884,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     output_dir = args.output or default_output_dir()
     limit = max(1, min(args.limit, 25))
-    if not args.query and not args.cli:
-        return launch_gui(limit, output_dir)
     console = Console()
-    console.print("+" + "-" * 62 + "+")
-    console.print(f"| {APP_NAME} v{APP_VERSION}".ljust(63) + "|")
-    console.print("| Searches public sources. Use legally and respect privacy.".ljust(63) + "|")
-    console.print("+" + "-" * 62 + "+")
-    query = args.query or console.input("[bold]What should I search for?[/bold] ").strip()
-    if not query:
-        console.print("[red]A search query is required.[/red]")
-        return 2
-    query_type, findings, errors = run_search(query, limit, console)
-    display_findings(findings, console)
-    json_path, md_path = save_reports(query, query_type, findings, errors, output_dir)
-    console.print(f"\n[green]Saved:[/green] {json_path.resolve()}")
-    console.print(f"[green]Saved:[/green] {md_path.resolve()}")
-    if errors:
-        console.print(f"[yellow]{len(errors)} source(s) were unavailable; details are in the report.[/yellow]")
-    if argv is None and not args.no_pause and getattr(sys, "frozen", False):
-        console.input("\nPress Enter to close...")
+    if not args.query:
+        return interactive_loop(limit, output_dir, console)
+    print_banner(console)
+    execute_query(args.query, limit, output_dir, console)
     return 0
 
 

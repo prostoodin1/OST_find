@@ -2,17 +2,22 @@
 
 `OST_find` is a terminal application for fast research across public internet sources. It accepts a username, domain, email address, IP address, or ordinary search phrase and collects useful links into JSON and Markdown reports.
 
-## Version 0.2.0
+## Version 0.3.0
 
-- Windows interface that stays open for repeated searches;
-- gray example text and built-in input help;
-- clickable, normalized result links without search-engine redirect URLs;
+- persistent terminal session that stays open for repeated searches;
+- dim example text and built-in `help` command;
+- normalized destination links without search-engine redirect URLs;
 - animated progress and source status;
 - automatic query-type detection;
 - DuckDuckGo and Bing web results;
 - GitHub users and repositories;
 - Hacker News discussions;
 - Wikipedia references and Stack Overflow discussions;
+- GitLab projects;
+- urlscan.io results for domains and IP addresses;
+- RDAP and reverse-DNS information for IP addresses;
+- expanded A, AAAA, MX, NS and TXT DNS records;
+- Wayback Machine history shortcut and public `security.txt` discovery;
 - DNS, RDAP and Certificate Transparency data for domains;
 - public Gravatar profile lookup for email addresses;
 - Google, Bing and Reddit shortcuts;
@@ -21,14 +26,14 @@
 
 ## Windows
 
-Download `OST_find_0.2.0_x64-portable.zip` from the latest Ideas preview release, extract the whole archive and double-click `OST_find.exe`.
+Download the direct `OST_find_0.3.0_x64.exe` or the portable `OST_find_0.3.0_x64-portable.zip` from the latest Ideas preview release. The portable ZIP remains available if antivirus software dislikes unsigned single-file applications.
 
-The app keeps the window open after each search. Enter another query and press **Найти**; use **Помощь** for examples of supported input.
+Double-click the executable. The terminal stays open after each search and displays another `OST_find>` prompt. Type `help` for examples, `clear` to clear the screen, or `exit` to close.
 
 The source version also has a terminal mode:
 
 ```powershell
-python ost_find.py --cli "example.com"
+python ost_find.py "example.com"
 ```
 
 Reports are written to the `reports` folder next to the current working directory.

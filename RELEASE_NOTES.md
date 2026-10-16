@@ -1,12 +1,14 @@
-# OST_find 0.2.0
+# OST_find 0.3.0
 
-Windows GUI and broader public-web search.
+Persistent terminal and stronger public OSINT coverage.
 
-- Search repeatedly without reopening the application.
-- Click normalized destination links directly in the results window.
-- See a gray input example and Russian help with supported query formats.
-- Search DuckDuckGo, Bing, GitHub, Hacker News, Wikipedia, Stack Overflow and type-specific public sources.
+- Search repeatedly from the same `OST_find>` terminal session.
+- Use dim input examples plus `help`, `clear` and `exit` commands.
+- See normalized destination URLs instead of Bing or DuckDuckGo redirect links.
+- Search DuckDuckGo, Bing, GitHub, GitLab, Hacker News, Wikipedia and Stack Overflow.
+- Inspect public urlscan.io data, IP RDAP, reverse DNS, expanded DNS records, `security.txt`, certificates and Wayback history.
 - Keep JSON and Markdown reports for every query.
+- Choose either a direct standalone EXE or the lower-risk portable ZIP.
 
 The application searches public sources. It cannot access private pages or literally index every page on the internet.
 
