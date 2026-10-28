@@ -2,11 +2,11 @@
 
 OSINT-приложение для исследования публичных источников: ник, домен, email, IP или обычная тема. Собирает найденные ссылки и сохраняет отчёты JSON/Markdown. API-ключи не требуются.
 
-**Личный репозиторий проекта:** [prostoodin1/OST_find](https://github.com/prostoodin1/OST_find). Все выпущенные версии перенесены сюда из Ideas с проверкой SHA-256. Репозиторий остаётся приватным.
+**Открытый репозиторий проекта:** [prostoodin1/OST_find](https://github.com/prostoodin1/OST_find). Исходники и релизы доступны всем. Ранее выпущенные версии перенесены сюда из Ideas с проверкой SHA-256.
 
 ## Скачать и запустить
 
-[Все релизы](https://github.com/prostoodin1/OST_find/releases) · [История версий](VERSIONS.md)
+[Последний релиз](https://github.com/prostoodin1/OST_find/releases/latest) · [Все версии](https://github.com/prostoodin1/OST_find/releases) · [История версий](VERSIONS.md)
 
 Версия **0.5.0 Spider**:
 
