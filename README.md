@@ -2,7 +2,7 @@
 
 `OST_find` is a terminal application for fast research across public internet sources. It accepts a username, domain, email address, IP address, or ordinary search phrase and collects useful links into JSON and Markdown reports.
 
-## Version 0.1.0
+## Version 0.1.1
 
 - animated terminal progress;
 - automatic query-type detection;
@@ -17,13 +17,15 @@
 
 ## Windows
 
-Download `OST_find.exe` from the latest GitHub release and double-click it, or run:
+Download `OST_find_0.1.1_x64-portable.zip` from the latest Ideas preview release, extract the whole archive and double-click `OST_find.exe`, or run:
 
 ```powershell
 .\OST_find.exe "example.com"
 ```
 
 Reports are written to the `reports` folder next to the current working directory.
+
+The portable folder build deliberately avoids the self-extracting `onefile` format, which can trigger false-positive antivirus detections in unsigned PyInstaller applications.
 
 ## From source
 

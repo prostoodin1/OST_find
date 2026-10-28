@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import hashlib
 import html
 import ipaddress
@@ -8,7 +9,8 @@ import json
 import re
 import socket
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,16 +18,28 @@ from typing import Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from rich.table import Table
 
 
 APP_NAME = "OST_find"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} public-source research tool"
 DEFAULT_TIMEOUT = 12
+
+
+class Console:
+    """Tiny ANSI-friendly console wrapper that keeps the packaged app dependency-light."""
+
+    _markup = re.compile(r"\[/?(?:bold|dim|cyan|green|yellow|red|magenta)(?: [^\]]+)?\]")
+
+    @classmethod
+    def _plain(cls, value: object) -> str:
+        return cls._markup.sub("", str(value))
+
+    def print(self, *values: object) -> None:
+        builtins.print(*(self._plain(value) for value in values))
+
+    def input(self, prompt: str) -> str:
+        return builtins.input(self._plain(prompt))
 
 
 @dataclass(slots=True)
@@ -259,23 +273,30 @@ def run_search(query: str, limit: int, console: Console) -> tuple[str, list[Find
 
     findings = search_links(query, query_type)
     errors: list[str] = []
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold cyan]{task.description}"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task_id = progress.add_task("Searching public sources", total=len(jobs))
-        with ThreadPoolExecutor(max_workers=min(5, len(jobs))) as pool:
-            futures = {pool.submit(job): name for name, job in jobs.items()}
-            for future in as_completed(futures):
-                name = futures[future]
+    with ThreadPoolExecutor(max_workers=min(5, len(jobs))) as pool:
+        pending = {pool.submit(job): name for name, job in jobs.items()}
+        completed = 0
+        spinner = "|/-\\"
+        frame = 0
+        while pending:
+            done, _ = wait(pending, timeout=0.12, return_when=FIRST_COMPLETED)
+            if not done:
+                builtins.print(
+                    f"\r{spinner[frame % len(spinner)]} Searching public sources [{completed}/{len(jobs)}]",
+                    end="",
+                    flush=True,
+                )
+                frame += 1
+                continue
+            for future in done:
+                name = pending.pop(future)
                 try:
                     findings.extend(future.result())
                 except Exception as exc:  # network failures should not abort the report
                     errors.append(f"{name}: {type(exc).__name__}: {exc}")
-                progress.advance(task_id)
-                progress.update(task_id, description=f"Checked {name}")
+                completed += 1
+                builtins.print(f"\r✓ Checked {name} [{completed}/{len(jobs)}]".ljust(72))
+            time.sleep(0.03)
 
     unique: dict[tuple[str, str], Finding] = {}
     for item in findings:
@@ -322,13 +343,13 @@ def save_reports(query: str, query_type: str, findings: list[Finding], errors: l
 
 
 def display_findings(findings: list[Finding], console: Console) -> None:
-    table = Table(title=f"{APP_NAME} results", header_style="bold magenta", show_lines=True)
-    table.add_column("Source", style="cyan", no_wrap=True)
-    table.add_column("Title", style="bold")
-    table.add_column("URL", overflow="fold")
-    for item in findings:
-        table.add_row(item.source, item.title, item.url)
-    console.print(table)
+    console.print(f"\n{APP_NAME} results ({len(findings)})")
+    console.print("=" * 72)
+    for index, item in enumerate(findings, start=1):
+        console.print(f"{index:02}. [{item.source}] {item.title}")
+        console.print(f"    {item.url}")
+        if item.summary:
+            console.print(f"    {item.summary}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -344,13 +365,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     console = Console()
-    console.print(
-        Panel.fit(
-            f"[bold cyan]{APP_NAME}[/bold cyan] [dim]v{APP_VERSION}[/dim]\n"
-            "Searches only public sources. Use legally and respect privacy.",
-            border_style="cyan",
-        )
-    )
+    console.print("+" + "-" * 62 + "+")
+    console.print(f"| {APP_NAME} v{APP_VERSION}".ljust(63) + "|")
+    console.print("| Searches public sources. Use legally and respect privacy.".ljust(63) + "|")
+    console.print("+" + "-" * 62 + "+")
     query = args.query or console.input("[bold]What should I search for?[/bold] ").strip()
     if not query:
         console.print("[red]A search query is required.[/red]")
