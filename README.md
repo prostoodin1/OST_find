@@ -1,58 +1,78 @@
-# OST_find
+# OST Finder · Spider
 
-`OST_find` is a terminal application for fast research across public internet sources. It accepts a username, domain, email address, IP address, or ordinary search phrase and collects useful links into JSON and Markdown reports.
+OSINT-приложение для исследования публичных источников: ник, домен, email, IP или обычная тема. Собирает найденные ссылки и сохраняет отчёты JSON/Markdown. API-ключи не требуются.
 
-## Version 0.3.0
+**Личный репозиторий проекта:** [prostoodin1/OST_find](https://github.com/prostoodin1/OST_find). Все выпущенные версии перенесены сюда из Ideas с проверкой SHA-256. Репозиторий остаётся приватным.
 
-- persistent terminal session that stays open for repeated searches;
-- dim example text and built-in `help` command;
-- normalized destination links without search-engine redirect URLs;
-- animated progress and source status;
-- automatic query-type detection;
-- DuckDuckGo and Bing web results;
-- GitHub users and repositories;
-- Hacker News discussions;
-- Wikipedia references and Stack Overflow discussions;
-- GitLab projects;
-- urlscan.io results for domains and IP addresses;
-- RDAP and reverse-DNS information for IP addresses;
-- expanded A, AAAA, MX, NS and TXT DNS records;
-- Wayback Machine history shortcut and public `security.txt` discovery;
-- DNS, RDAP and Certificate Transparency data for domains;
-- public Gravatar profile lookup for email addresses;
-- Google, Bing and Reddit shortcuts;
-- JSON and Markdown reports;
-- no API keys required.
+## Скачать и запустить
 
-## Windows
+[Все релизы](https://github.com/prostoodin1/OST_find/releases) · [История версий](VERSIONS.md)
 
-Download the direct `OST_find_0.3.0_x64.exe` or the portable `OST_find_0.3.0_x64-portable.zip` from the latest Ideas preview release. The portable ZIP remains available if antivirus software dislikes unsigned single-file applications.
+Версия **0.4.0 Spider**:
 
-Double-click the executable. The terminal stays open after each search and displays another `OST_find>` prompt. Type `help` for examples, `clear` to clear the screen, or `exit` to close.
+- `OST_Finder_Spider_0.4.0_x64.exe` — отдельный EXE с новым оконным интерфейсом;
+- `OST_Finder_Spider_0.4.0_x64-portable.zip` — распакуйте всю папку и запустите `OST_Finder_Spider.exe`;
+- `OST_find_0.4.0_x64.exe` — самостоятельная терминальная версия;
+- архив исходников и `SHA256SUMS.txt` — код и контрольные суммы.
 
-The source version also has a terminal mode:
+Из-за встроенного Chromium оконная версия значительно больше терминальной. Для запуска Windows EXE отдельный Python не нужен.
+
+## Spider: интерфейс и браузер
+
+Тёмный интерфейс с голубыми и зелёными акцентами вдохновлён рабочими инструментами Kali. Это самостоятельное приложение с собственным дизайном.
+
+1. Введите запрос и нажмите **Начать поиск**.
+2. Откроется отдельное небольшое окно приватного браузера. Во время поиска по странице ползает анимированный паук.
+3. Приложение параллельно запрашивает публичные источники и извлекает реальные ссылки из DOM поисковой выдачи браузера.
+4. Браузер посещает до двух найденных страниц и добавляет их заголовки, URL и описание. Анимация показывает процесс, найденные данные появляются в таблице.
+5. После завершения можно сразу вводить новый запрос. Двойной щелчок по результату открывает ссылку в том же приватном браузере.
+
+Кнопка **Мини-браузер** переключает отдельное окно и встроенную панель. **Как искать** показывает примеры. Недоступные сайты, CAPTCHA и сетевые ошибки записываются в журнал; остальные источники продолжают работать.
+
+| Ввод | Что ищется |
+| --- | --- |
+| `@username` | публичные профили и репозитории |
+| `example.com` | веб, DNS, RDAP, сертификаты, urlscan, архив |
+| `name@example.com` | публичные упоминания и Gravatar |
+| `8.8.8.8` | IP RDAP, reverse DNS, urlscan и веб |
+| `open source video editor` | обычная тема по публичным источникам |
+
+Источники: DuckDuckGo, Bing, GitHub, GitLab, Hacker News, Wikipedia, Stack Overflow, DNS, RDAP, Certificate Transparency, urlscan.io, Gravatar; также доступны поисковые и Wayback-ссылки. Ссылки для ручного поиска отмечены `Search shortcut` и не означают найденное совпадение.
+
+## Что означает инкогнито
+
+Встроенный браузер использует отдельный **off-the-record** профиль Qt WebEngine: cookies и кэш остаются в оперативной памяти и не переносятся в следующий запуск. Приложение не использует ваши профили Chrome/Edge или их авторизацию. [Документация Qt](https://doc.qt.io/qt-6/qwebengineprofile.html#QWebEngineProfile).
+
+Это не VPN и не Tor: сайты видят обычное сетевое соединение. JSON/Markdown-отчёты намеренно сохраняются в `reports` рядом с EXE; их папку можно изменить кнопкой **Куда сохранять…**. Cookies могут использоваться между поисками в рамках одного запуска приложения.
+
+## Терминал
+
+Запустите `OST_find_0.4.0_x64.exe`. Постоянная сессия `OST_find>` поддерживает `help`, `clear`, `exit`. Для одного запроса:
 
 ```powershell
-python ost_find.py "example.com"
+./OST_find_0.4.0_x64.exe --limit 5 "example.com"
 ```
 
-Reports are written to the `reports` folder next to the current working directory.
+## Из исходников
 
-The portable folder build deliberately avoids the self-extracting `onefile` format, which can trigger false-positive antivirus detections in unsigned PyInstaller applications.
-
-No application can literally index the entire internet. OST Finder combines general public-web search engines with focused public sources. Closed pages, private accounts and content blocked by source providers are not available.
-
-## From source
+Python 3.10+ для терминала и Python с подходящим колесом PySide6 для GUI.
 
 ```powershell
 python -m pip install -r requirements.txt
 python ost_find.py
 ```
 
-## Responsible use
+Оконный вариант:
 
-The application queries only public sources and does not bypass authentication, solve CAPTCHAs, access leaked databases, or attempt to identify private accounts. Use it only for lawful research and respect privacy, source terms, and local regulations.
+```powershell
+python -m pip install -r requirements-gui.txt
+python ost_spider.py
+```
 
-## License
+Для тестов и сборки дополнительно установите `python -m pip install -r requirements-dev.txt`. Проверки: `python -m pytest -q` (для браузерных тестов нужен PySide6). Сборка Windows: `./build.ps1` для терминала, `./build-gui.ps1` для Spider. Параметр `-Python` позволяет указать Python из своего виртуального окружения.
 
-MIT
+Полностью индексировать весь интернет приложение не может. Доступность выдачи зависит от самих источников; CAPTCHA и ограничения не обходятся. Проект работает с публичными страницами.
+
+## Лицензии
+
+Собственный код — MIT, см. [LICENSE](LICENSE). Qt/PySide6/Chromium и другие библиотеки имеют собственные лицензии: [THIRD_PARTY.md](THIRD_PARTY.md), папка `licenses/`. Исходники и инструкции сборки предоставляются вместе с релизом.

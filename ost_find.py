@@ -23,7 +23,7 @@ import requests
 
 
 APP_NAME = "OST_find"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} public-source research tool"
 DEFAULT_TIMEOUT = 12
 
@@ -521,6 +521,7 @@ def run_search(
     limit: int,
     console: Console | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    findings_callback: Callable[[list[Finding]], None] | None = None,
 ) -> tuple[str, list[Finding], list[str]]:
     query_type = detect_query_type(query)
     jobs: dict[str, Callable[[], list[Finding]]] = {
@@ -576,7 +577,10 @@ def run_search(
             for future in done:
                 name = pending.pop(future)
                 try:
-                    findings.extend(future.result())
+                    source_findings = future.result()
+                    findings.extend(source_findings)
+                    if findings_callback:
+                        findings_callback(source_findings)
                 except Exception as exc:  # network failures should not abort the report
                     errors.append(f"{name}: {type(exc).__name__}: {exc}")
                 completed += 1
