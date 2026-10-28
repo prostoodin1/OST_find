@@ -4,6 +4,7 @@
 
 | Версия | Интерфейс | Основное изменение |
 | --- | --- | --- |
+| [0.5.0 Wireframe](https://github.com/prostoodin1/OST_find/releases/tag/v0.5.0) | GUI + CLI | каркасный паук по видеореференсу, лапы привязаны к DOM, захват ссылок и текста, подсветка и поднимающиеся фрагменты |
 | [0.4.0 Spider](https://github.com/prostoodin1/OST_find/releases/tag/v0.4.0) | GUI + отдельный CLI | приватный мини-браузер, сбор DOM-ссылок и метаданных, анимированный паук |
 | [0.3.0](https://github.com/prostoodin1/OST_find/releases/tag/v0.3.0) | терминал | постоянная сессия, прямой EXE, GitLab, urlscan, расширенный публичный OSINT |
 | [0.2.0](https://github.com/prostoodin1/OST_find/releases/tag/v0.2.0) | исторический GUI | повторный поиск, подсказки, исправление редиректов и расширенный веб-поиск |

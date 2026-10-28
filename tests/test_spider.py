@@ -15,6 +15,7 @@ from PySide6.QtWebEngineCore import QWebEngineProfile
 
 from ost_spider import PrivateBrowser, SpiderWindow, safe_web_url
 from ost_find import Finding
+from spider_overlay import SpiderOverlay, parse_targets
 
 
 @pytest.fixture(scope='module')
@@ -71,6 +72,8 @@ def test_browser_collects_actual_dom_links_and_page_metadata(app):
     browser = PrivateBrowser()
     captured = []
     finished = []
+    browser.resize(640, 480)
+    browser.show()
     browser.findings.connect(captured.extend)
     browser.completed.connect(finished.append)
     try:
@@ -81,7 +84,7 @@ def test_browser_collects_actual_dom_links_and_page_metadata(app):
         browser.navigate(f'http://127.0.0.1:{server.server_port}/search', 'search')
         wait_until(app, lambda: bool(finished))
         assert finished == [[]]
-        assert any(f.source == 'Browser / DuckDuckGo' and f.title == 'Public evidence' for f in captured)
+        assert any(f.source == 'Browser / DOM link' and f.title == 'Public evidence' for f in captured)
         assert any(f.source == 'Browser / Page' and f.summary == 'Verified browser extraction' for f in captured)
         assert not browser.view.spider.timer.isActive()
     finally:
@@ -124,3 +127,39 @@ def test_window_keeps_two_searches_and_reports_independent(app, tmp_path):
     assert len(reports) == 2
     assert {json.loads(p.read_text(encoding='utf-8'))['query'] for p in reports} == {'query-0', 'query-1'}
     window.close()
+
+
+def test_overlay_collects_only_after_contact_and_only_once(app):
+    spider = SpiderOverlay()
+    spider.resize(600, 450)
+    captures = []
+    spider.collected.connect(captures.append)
+    spider.set_targets([{'text': 'Real DOM link', 'url': 'https://example.com/evidence',
+                         'kind': 'link', 'rect': [60, 55, 130, 22]}])
+    spider.advance(.05)
+    assert captures == []
+    for _ in range(160):
+        spider.advance(.05)
+    assert len(captures) == 1
+    assert captures[0]['url'] == 'https://example.com/evidence'
+    assert len(spider.feet) == 8
+    assert spider.count == 1
+
+
+def test_overlay_never_invents_data_when_no_dom_targets(app):
+    spider = SpiderOverlay()
+    spider.resize(600, 450)
+    captures = []
+    spider.collected.connect(captures.append)
+    for _ in range(100):
+        spider.advance(.05)
+    assert captures == []
+    assert spider.count == 0
+
+
+def test_dom_geometry_validation_and_clipping():
+    valid = {'text': 'Visible evidence', 'url': 'https://example.com', 'kind': 'link', 'rect': [-10, 20, 120, 30]}
+    assert parse_targets([valid], 600, 450)[0].rect == (0, 20, 110, 30)
+    assert parse_targets([{**valid, 'rect': [0, float('nan'), 80, 20]}], 600, 450) == []
+    assert parse_targets([{**valid, 'rect': [0, 700, 80, 20]}], 600, 450) == []
+    assert parse_targets([{**valid, 'url': 'file:///private.txt'}], 600, 450) == []

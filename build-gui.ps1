@@ -7,5 +7,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Spider build failed' }
 Copy-Item -LiteralPath 'README.md','THIRD_PARTY.md','VERSIONS.md','LICENSE' -Destination 'dist-gui\OST_Finder_Spider'
 Copy-Item -LiteralPath 'licenses' -Destination 'dist-gui\OST_Finder_Spider\licenses' -Recurse -Force
-Compress-Archive -Path 'dist-gui\OST_Finder_Spider\*' -DestinationPath 'dist-gui\OST_Finder_Spider_0.4.0_x64-portable.zip' -Force
+Compress-Archive -Path 'dist-gui\OST_Finder_Spider\*' -DestinationPath 'dist-gui\OST_Finder_Spider_0.5.0_x64-portable.zip' -Force
 Write-Host 'Spider builds completed in dist-gui/'

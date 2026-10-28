@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import time
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
-from PySide6.QtCore import QPointF, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPen
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
@@ -20,6 +19,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngin
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from ost_find import APP_VERSION, Finding, default_output_dir, normalize_result_url, run_search, save_reports
+from spider_overlay import SpiderOverlay as WireframeSpider
 
 
 STYLE = """
@@ -76,66 +76,10 @@ class PublicPage(QWebEnginePage):
         pass
 
 
-class SpiderOverlay(QWidget):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.active = False
-        self.started = time.monotonic()
-        self.timer = QTimer(self)
-        self.timer.setInterval(33)
-        self.timer.timeout.connect(self.animate)
-
-    def animate(self):
-        self.raise_()
-        self.update()
-
-    def set_active(self, active):
-        self.active = active
-        self.started = time.monotonic()
-        self.setVisible(active)
-        if active:
-            self.timer.start()
-        else:
-            self.timer.stop()
-
-    def paintEvent(self, event):
-        if not self.active:
-            return
-        elapsed = time.monotonic() - self.started
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        width, height = self.width(), self.height()
-        x = width / 2 + math.sin(elapsed * .52) * max(0, width / 2 - 65)
-        y = height / 2 + math.sin(elapsed * .85) * max(0, height / 2 - 60)
-        painter.setPen(QPen(QColor(78, 226, 206, 100), 1))
-        painter.drawLine(QPointF(width / 2, 0), QPointF(x, y))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(6, 20, 30, 210))
-        painter.drawEllipse(QPointF(x, y), 38, 38)
-        painter.setPen(QPen(QColor('#5ff0cb'), 2.5))
-        for side in (-1, 1):
-            for leg in range(4):
-                lift = math.sin(elapsed * 9 + leg * 1.6 + side) * 5
-                shoulder = QPointF(x + side * 7, y - 8 + leg * 5)
-                joint = QPointF(x + side * (20 + leg * 2), y - 26 + leg * 17 + lift)
-                foot = QPointF(x + side * (32 - leg), y - 18 + leg * 13 - lift)
-                painter.drawLine(shoulder, joint)
-                painter.drawLine(joint, foot)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor('#52d9bc'))
-        painter.drawEllipse(QPointF(x, y + 5), 9, 13)
-        painter.drawEllipse(QPointF(x, y - 9), 7, 7)
-        painter.setBrush(QColor('#081922'))
-        painter.drawEllipse(QPointF(x - 3, y - 11), 1.5, 1.5)
-        painter.drawEllipse(QPointF(x + 3, y - 11), 1.5, 1.5)
-
-
 class BrowserView(QWebEngineView):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.spider = SpiderOverlay(self)
+        self.spider = WireframeSpider(self)
         self.spider.hide()
 
     def resizeEvent(self, event):
@@ -163,6 +107,17 @@ class PrivateBrowser(QWidget):
         self.errors = []
         self.limit = 5
         self.stage = "idle"
+        self.tour_timer = QTimer(self)
+        self.tour_timer.setInterval(250)
+        self.tour_timer.timeout.connect(self.poll_targets)
+        self.tour_kind = 'search'
+        self.poll_pending = False
+        self.tour_count = 0
+        self.empty_polls = 0
+        self.tour_started = 0
+        self.tour_callback = None
+        resource_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+        self.targets_script = (resource_root / 'browser_targets.js').read_text(encoding='utf-8')
         self.profile = QWebEngineProfile(self)  # Unnamed = off-the-record.
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
         self.profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
@@ -179,10 +134,14 @@ class PrivateBrowser(QWidget):
         self.view.setPage(page)
         page.permissionRequested.connect(lambda permission: permission.deny())
         page.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, False)
+        dark_mode = getattr(QWebEngineSettings.WebAttribute, 'ForceDarkMode', None)
+        if dark_mode is not None:
+            page.settings().setAttribute(dark_mode, True)
         self.view.setZoomFactor(.8)
         self.view.setMinimumSize(360, 310)
         self.view.urlChanged.connect(lambda url: self.address.setText(url.toString() if url.scheme() in {'http', 'https'} else ''))
         self.view.loadFinished.connect(self.loaded)
+        self.view.spider.collected.connect(self.capture_target)
         # Keep the overlay above Chromium's replaceable rendering widget,
         # including when the dock becomes a separate native window.
         canvas = QWidget()
@@ -207,6 +166,8 @@ class PrivateBrowser(QWidget):
             </body></html>""")
 
     def navigate(self, url, stage):
+        self.tour_timer.stop()
+        self.view.spider.reset_page()
         self.generation += 1
         generation = self.generation
         self.stage = stage
@@ -219,13 +180,14 @@ class PrivateBrowser(QWidget):
         self.errors = []
         self.urls = []
         self.limit = limit
+        self.view.spider.reset_session()
         self.view.setEnabled(False)
         self.view.spider.set_active(True)
         self.status.emit('Браузер: открываю поисковую страницу')
         self.navigate('https://duckduckgo.com/?q=' + quote_plus(query) + '&ia=web', 'search')
 
     def expired(self, generation):
-        if self.busy and generation == self.generation:
+        if self.busy and generation == self.generation and self.stage != 'tour':
             self.waiting_load = False
             self.generation += 1
             self.view.stop()
@@ -275,12 +237,12 @@ class PrivateBrowser(QWidget):
             QTimer.singleShot(1000, lambda: self.extract_search(generation, attempt + 1))
             return
         if valid:
-            self.findings.emit(valid)
             self.urls = [finding.url for finding in valid[:2]]
-            self.status.emit(f'Браузер: собрано ссылок — {len(valid)}, проверяю страницы')
+            self.status.emit(f'Браузер: вижу {len(valid)} ссылок, паук собирает элементы')
+            self.start_tour('search', self.next_page)
         else:
             self.errors.append('Browser: выдача не предоставила ссылок; возможна CAPTCHA или смена разметки')
-        self.next_page()
+            self.next_page()
 
     def page_result(self, generation, data):
         if not self.busy or generation != self.generation:
@@ -295,7 +257,80 @@ class PrivateBrowser(QWidget):
                 finding = Finding('Browser / Page', str(data.get('title') or url)[:300], url,
                                   str(data.get('summary') or '')[:500], 'browser')
                 self.findings.emit([finding])
-        QTimer.singleShot(900, self.next_page)
+        self.start_tour('page', self.next_page)
+
+    def start_tour(self, kind, callback):
+        self.stage = 'tour'
+        self.tour_kind = kind
+        self.tour_count = 0
+        self.empty_polls = 0
+        self.poll_pending = False
+        self.tour_started = time.monotonic()
+        self.tour_callback = callback
+        self.tour_timer.start()
+        self.poll_targets()
+
+    def poll_targets(self):
+        if not self.busy or self.stage != 'tour':
+            return
+        if time.monotonic() - self.tour_started > 12:
+            self.finish_tour()
+            return
+        if self.poll_pending:
+            return
+        self.poll_pending = True
+        generation = self.generation
+        script = self.targets_script.replace('__ZOOM__', str(self.view.zoomFactor())).replace('__SEARCH__', 'true' if self.tour_kind == 'search' else 'false')
+        self.view.page().runJavaScript(script, lambda data: self.received_targets(generation, data))
+
+    def received_targets(self, generation, payload):
+        if not self.busy or generation != self.generation or self.stage != 'tour':
+            return
+        self.poll_pending = False
+        try:
+            data = json.loads(payload) if isinstance(payload, str) else {}
+        except ValueError:
+            data = {}
+        rows = data.get('targets', []) if isinstance(data, dict) else []
+        self.view.spider.set_targets(rows)
+        if not self.view.spider.targets or all(target.key in self.view.spider.seen for target in self.view.spider.targets):
+            self.empty_polls += 1
+            if self.empty_polls >= 8:
+                self.finish_tour()
+        else:
+            self.empty_polls = 0
+
+    def capture_target(self, target):
+        if not self.busy or self.stage != 'tour':
+            return
+        goal = min(self.limit, 4) if self.tour_kind == 'search' else 3
+        if self.tour_count >= goal:
+            return
+        url = safe_web_url(str(target.get('url') or ''))
+        text = str(target.get('text') or '').strip()
+        if not url or not text:
+            return
+        source = 'Browser / DOM link' if target.get('kind') == 'link' else 'Browser / Text'
+        self.findings.emit([Finding(source, text[:150], url, text[:350], 'browser')])
+        self.tour_count += 1
+        self.status.emit(f'Паук захватил: {text[:75]}')
+        if self.tour_count >= goal:
+            self.tour_timer.stop()
+            self.view.spider.set_targets([])
+            generation = self.generation
+            QTimer.singleShot(1500, lambda: self.finish_tour() if generation == self.generation else None)
+        elif self.tour_count % 2 == 0 and self.tour_kind != 'search':
+            self.view.page().runJavaScript('window.scrollBy({top:innerHeight*.35,behavior:"smooth"})')
+
+    def finish_tour(self):
+        if not self.busy or self.stage != 'tour':
+            return
+        self.tour_timer.stop()
+        self.stage = 'between-pages'
+        callback, self.tour_callback = self.tour_callback, None
+        self.view.spider.reset_page()
+        if callback:
+            callback()
 
     def next_page(self):
         if not self.busy:
@@ -305,6 +340,7 @@ class PrivateBrowser(QWidget):
             self.status.emit('Браузер: изучаю ' + (urlparse(url).hostname or url))
             self.navigate(url, 'page')
         else:
+            self.tour_timer.stop()
             self.generation += 1
             self.busy = False
             self.stage = 'idle'
@@ -360,7 +396,7 @@ class SpiderWindow(QMainWindow):
         brand = QLabel('OST FINDER')
         brand.setObjectName('brand')
         header.addWidget(brand)
-        tag = QLabel('SPIDER / 0.4')
+        tag = QLabel('WIREFRAME / ' + APP_VERSION)
         tag.setObjectName('eyebrow')
         header.addWidget(tag)
         header.addStretch()
@@ -502,7 +538,11 @@ class SpiderWindow(QMainWindow):
         for finding in findings:
             url = safe_web_url(finding.url)
             key = (url.casefold(), finding.title.casefold())
-            if not url or key in self.findings:
+            if not url:
+                continue
+            if key in self.findings:
+                if finding.summary and not self.findings[key].summary:
+                    self.findings[key].summary = finding.summary
                 continue
             finding.url = url
             self.findings[key] = finding

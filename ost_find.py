@@ -23,7 +23,7 @@ import requests
 
 
 APP_NAME = "OST_find"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} public-source research tool"
 DEFAULT_TIMEOUT = 12
 

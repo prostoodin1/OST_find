@@ -1,3 +1,11 @@
+# OST Finder 0.5.0 Wireframe
+
+- Procedural wireframe spider with eight articulated legs, based on the supplied video reference.
+- Live DOM rectangles guide the feet and the crawler route.
+- Each collected link/text fragment produces an actual collection event after contact.
+- Colored target boxes, lifted text packets and a CAPTURED counter replace the decorative icon.
+- Bounded page tours, scrolling, private profile, reports and a separate terminal build.
+
 # OST Finder 0.4.0 Spider
 
 - Kali-inspired dark native desktop interface with live results and source log.
