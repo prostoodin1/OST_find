@@ -14,6 +14,17 @@ function Child-Path([string]$root, [string]$relative) {
     }
     return $resolved
 }
+function Move-Retry([string]$source, [string]$destination) {
+    # A onefile bootloader and Chromium children can briefly outlive the Python PID.
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ($true) {
+        try { Move-Item -LiteralPath $source -Destination $destination -ErrorAction Stop; return }
+        catch {
+            if ([DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
 try {
     if ([IO.Path]::GetDirectoryName($backup) -ne $target -or [IO.Path]::GetFileName($backup) -notlike 'OST-update-backup-*') { throw 'Invalid backup path' }
     if (Test-Path -LiteralPath $backup) { throw 'Backup path already exists' }
@@ -36,10 +47,10 @@ try {
         if (Test-Path -LiteralPath $destination) {
             # Junctions can redirect a directory swap outside the install folder.
             if ((Get-Item -LiteralPath $destination -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing reparse point in install directory' }
-            Move-Item -LiteralPath $destination -Destination $savedPath
+            Move-Retry $destination $savedPath
             $saved.Add($entry.Name)
         }
-        Move-Item -LiteralPath $entry.FullName -Destination $destination
+        Move-Retry $entry.FullName $destination
         $installed.Add($entry.Name)
     }
     $exe = Child-Path $target $config.executable
@@ -53,10 +64,10 @@ try {
     # Keep the failed package in staging for inspection; restore only touched entries.
     foreach ($name in $installed) {
         $path = Child-Path $target $name
-        if (Test-Path -LiteralPath $path) { Move-Item -LiteralPath $path -Destination (Child-Path $staging $name) }
+        if (Test-Path -LiteralPath $path) { Move-Retry $path (Child-Path $staging $name) }
     }
     foreach ($name in $saved) {
-        Move-Item -LiteralPath (Child-Path $backup $name) -Destination (Child-Path $target $name)
+        Move-Retry (Child-Path $backup $name) (Child-Path $target $name)
     }
     Set-Content -LiteralPath $logPath -Value ('Update failed; restored previous files. ' + $failure) -Encoding UTF8
     if ($installed.Count -gt 0 -and (Test-Path -LiteralPath (Child-Path $target $config.executable))) {

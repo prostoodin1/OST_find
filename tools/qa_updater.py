@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import threading
 
 ROOT = Path(__file__).resolve().parents[1]
 QA = ROOT / 'qa-output' / ('updater-' + str(time.time_ns()))
@@ -12,25 +13,26 @@ QA.mkdir(parents=True)
 CSC = Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe')
 
 
-def stub(path, label, fail=False):
+def stub(path, label, fail=False, hold=False):
     code = '''using System; using System.IO;
     class App { static int Main(string[] args) {
       if (Array.IndexOf(args, "--update-healthcheck") >= 0) return FAIL;
       File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "started.txt"), "LABEL");
+      HOLD
       return 0;
-    }}'''.replace('FAIL', '1' if fail else '0').replace('LABEL', label)
+    }}'''.replace('FAIL', '1' if fail else '0').replace('LABEL', label).replace('HOLD', 'System.Threading.Thread.Sleep(2000);' if hold else '')
     source = path.with_suffix('.cs')
     source.write_text(code)
     subprocess.run([str(CSC), '/nologo', '/target:winexe', '/out:' + str(path), str(source)], check=True, capture_output=True)
     source.unlink()
 
 
-def run_case(name, fail=False, tamper=False):
+def run_case(name, fail=False, tamper=False, locked=False):
     folder = QA / name
     target, staging = folder / "app space & ' quote", folder / 'stage'
     target.mkdir(parents=True)
     staging.mkdir()
-    stub(target / 'app.exe', 'old')
+    stub(target / 'app.exe', 'old', hold=locked)
     stub(staging / 'app.exe', 'new', fail)
     (target / 'reports').mkdir()
     (target / 'reports' / 'keep.txt').write_text('user report')
@@ -44,10 +46,24 @@ def run_case(name, fail=False, tamper=False):
               'backup': str(target / 'OST-update-backup-test'), 'executable': 'app.exe', 'manifest': manifest, 'version': '9.0.0'}
     if tamper:
         (staging / '_internal' / 'new.txt').write_text('tampered')
+    if locked:
+        process = subprocess.Popen([str(target / 'app.exe')])
+        deadline = time.monotonic() + 3
+        while not (target / 'started.txt').exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert process.poll() is None
+        (target / 'started.txt').unlink()
+        file_lock = (target / 'app.exe').open('rb')
+        release_lock = threading.Timer(2, file_lock.close)
+        release_lock.start()
     path = folder / 'install.json'
     path.write_text(json.dumps(config), encoding='utf-8')
+    installed_at = time.monotonic()
     done = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(ROOT / 'update_helper.ps1'), '-ConfigPath', str(path)],
                           timeout=70, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    if locked:
+        assert time.monotonic() - installed_at >= 1.5
+        release_lock.join()
     if done.returncode != (1 if fail or tamper else 0):
         raise AssertionError((done.returncode, done.stdout, done.stderr, (folder / 'install.log').read_text(encoding='utf-8-sig')))
     if not tamper:
@@ -65,6 +81,6 @@ def run_case(name, fail=False, tamper=False):
     return {'case': name, 'exit_code': done.returncode, 'passed': True}
 
 
-results = [run_case('success'), run_case('rollback', fail=True), run_case('tampered', tamper=True)]
+results = [run_case('success'), run_case('rollback', fail=True), run_case('tampered', tamper=True), run_case('locked-executable', locked=True)]
 (QA / 'verification.json').write_text(json.dumps(results, indent=2))
 print(json.dumps({'output': str(QA), 'results': results}, indent=2))
