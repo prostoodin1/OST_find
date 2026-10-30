@@ -1,3 +1,14 @@
+# OST Finder 0.6.0 Search Quality + Updates
+
+- Query entities, exact-name search, optional context, Google/Yandex advanced-query shortcuts and namesake warnings.
+- Evidence-ranked results, canonical URL deduplication, copied-text warnings, low-match/spam filtering with retained evidence.
+- Bounded public HTML extraction, robots.txt, publisher metadata, cited summaries, chronology and possible numeric conflicts.
+- Optional Brave API and real Wayback snapshot lookup, source extension registry, 20s collection budgets and rate-limit cooldowns.
+- Local analysis by default: zero LLM requests. Optional Ollama/OpenRouter evidence selection uses at most one call, bounded input/output, existing citation IDs only.
+- Rich linked quality tab and no-save mode in GUI/CLI. Reports remain local and opt-out.
+- Full Windows EXE/portable self-update: release check, SHA-256, staged download, deferred install, backup, health check, rollback and restart. Controls in GUI and CLI.
+- 0.5.0 requires a one-time manual upgrade. Source checkouts update via git. SHA-256 is not a developer signature; evidence scores are not truth probabilities.
+
 # OST Finder 0.5.0 Wireframe
 
 - Procedural wireframe spider with eight articulated legs, based on the supplied video reference.

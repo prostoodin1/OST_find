@@ -11,15 +11,17 @@ from urllib.parse import quote_plus, urlparse
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QApplication, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+    QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QSpinBox, QStackedLayout, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QPushButton, QSpinBox, QStackedLayout, QTabWidget, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from ost_find import APP_VERSION, Finding, default_output_dir, normalize_result_url, run_search, save_reports
 from spider_overlay import SpiderOverlay as WireframeSpider
+from search_quality import analyse, llm_review, html_report, parse_query
+from updater import auto_updates_enabled, set_auto_updates, check_release, stage_update, schedule_install
 
 
 STYLE = """
@@ -50,6 +52,7 @@ QTreeWidget::item { padding:9px 4px; border-bottom:1px solid #192b3c; }
 QTreeWidget::item:selected { background:#1c4456; }
 QHeaderView::section { background:#152538; padding:10px; color:#91b4cc; border:none; }
 QPlainTextEdit { background:#0a121d; color:#92d4c1; font-family:'Consolas'; border:none; padding:8px; }
+QTextBrowser { background:#0d1724; color:#c7d9e8; border:none; padding:12px; font-size:14px; }
 QProgressBar { background:#1a293a; border:none; border-radius:3px; max-height:6px; }
 QProgressBar::chunk { background:#52d5c9; border-radius:3px; }
 QDockWidget { color:#8ecfe0; font-family:'Consolas'; }
@@ -110,6 +113,9 @@ class PrivateBrowser(QWidget):
         self.tour_timer = QTimer(self)
         self.tour_timer.setInterval(250)
         self.tour_timer.timeout.connect(self.poll_targets)
+        self.search_deadline = QTimer(self)
+        self.search_deadline.setSingleShot(True)
+        self.search_deadline.timeout.connect(self.end_budget)
         self.tour_kind = 'search'
         self.poll_pending = False
         self.tour_count = 0
@@ -176,6 +182,7 @@ class PrivateBrowser(QWidget):
         QTimer.singleShot(18000, lambda: self.expired(generation))
 
     def start(self, query, limit):
+        self.search_deadline.start(20000)
         self.busy = True
         self.errors = []
         self.urls = []
@@ -185,6 +192,14 @@ class PrivateBrowser(QWidget):
         self.view.spider.set_active(True)
         self.status.emit('Браузер: открываю поисковую страницу')
         self.navigate('https://duckduckgo.com/?q=' + quote_plus(query) + '&ia=web', 'search')
+
+    def end_budget(self):
+        if self.busy:
+            self.errors.append('Browser: time budget exceeded (20s), partial results retained')
+            self.urls.clear()
+            self.waiting_load = False
+            self.view.stop()
+            self.next_page()
 
     def expired(self, generation):
         if self.busy and generation == self.generation and self.stage != 'tour':
@@ -340,6 +355,7 @@ class PrivateBrowser(QWidget):
             self.status.emit('Браузер: изучаю ' + (urlparse(url).hostname or url))
             self.navigate(url, 'page')
         else:
+            self.search_deadline.stop()
             self.tour_timer.stop()
             self.generation += 1
             self.busy = False
@@ -372,6 +388,44 @@ class SearchThread(QThread):
             self.failed.emit(str(error))
 
 
+class QualityThread(QThread):
+    result = Signal(dict)
+
+    def __init__(self, query, findings, provider='', model='', parent=None):
+        super().__init__(parent)
+        self.query, self.findings, self.provider, self.model = query, findings, provider, model
+
+    def run(self):
+        try:
+            quality = analyse(self.query, self.findings, extract=True)
+            if self.provider:
+                try:
+                    quality['llm'] = llm_review(quality, self.provider, self.model)
+                except Exception as error:
+                    quality['llm_error'] = type(error).__name__
+        except Exception as error:
+            quality = analyse(self.query, self.findings)
+            quality['analysis_error'] = type(error).__name__
+        self.result.emit(quality)
+
+
+class UpdateThread(QThread):
+    result = Signal(str, object)
+
+    def run(self):
+        try:
+            release = check_release(APP_VERSION, 'gui')
+            if not release:
+                self.result.emit('Установлена последняя версия.', None)
+            elif not getattr(sys, 'frozen', False):
+                self.result.emit('Доступна ' + release['version'] + '. Для исходников: git pull; автоустановка работает в EXE.', None)
+            else:
+                self.result.emit('Обновление ' + release['version'] + ' загружается и проверяется…', None)
+                self.result.emit('Обновление проверено. Приложение перезапустится после завершения поиска.', stage_update(release))
+        except Exception as error:
+            self.result.emit('Обновление недоступно: ' + type(error).__name__ + '. Текущая версия сохранена.', None)
+
+
 class SpiderWindow(QMainWindow):
     def __init__(self, output=None, limit=5):
         super().__init__()
@@ -383,6 +437,11 @@ class SpiderWindow(QMainWindow):
         self.errors = []
         self.busy = False
         self.thread = None
+        self.quality_thread = None
+        self.update_thread = None
+        self.pending_update = None
+        self.quality = None
+        self.quality_started = False
         self.elapsed = QTimer(self)
         self.elapsed.timeout.connect(self.tick)
         self.elapsed.setInterval(250)
@@ -427,6 +486,21 @@ class SpiderWindow(QMainWindow):
         self.search_button.clicked.connect(self.start_search)
         search.addWidget(self.search_button)
         layout.addLayout(search)
+        self.context = QLineEdit()
+        self.context.setPlaceholderText('Контекст для отсечения тёзок: компания, город, профессия (необязательно)')
+        layout.addWidget(self.context)
+        options = QHBoxLayout()
+        self.save_enabled = QCheckBox('Сохранять отчёты на этом компьютере')
+        self.save_enabled.setChecked(True)
+        self.save_enabled.setToolTip('Снимите флажок, чтобы запрос и результаты оставались только в памяти приложения.')
+        options.addWidget(self.save_enabled)
+        self.llm_provider = QComboBox()
+        self.llm_provider.addItems(['Без LLM · 0 запросов', 'Ollama · локально', 'OpenRouter · отправка выдержек'])
+        options.addWidget(self.llm_provider)
+        self.llm_model = QLineEdit()
+        self.llm_model.setPlaceholderText('Модель для LLM (1 запрос на поиск)')
+        options.addWidget(self.llm_model)
+        layout.addLayout(options)
         metrics = QHBoxLayout()
         self.found_label = self.metric(metrics, 'СОБРАНО ССЫЛОК', '00')
         self.sources_label = self.metric(metrics, 'ИСТОЧНИКОВ ПРОВЕРЕНО', '0 / 0')
@@ -450,13 +524,18 @@ class SpiderWindow(QMainWindow):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(1000)
         self.tabs.addTab(self.log, 'Журнал источников')
+        self.quality_view = QTextBrowser()
+        self.quality_view.setReadOnly(True)
+        self.quality_view.setOpenLinks(False)
+        self.quality_view.anchorClicked.connect(lambda url: self.browser.preview(url.toString()) if not self.busy else None)
+        self.tabs.addTab(self.quality_view, 'Качество и сводка')
         layout.addWidget(self.tabs, 1)
         self.status = QLabel('Введите запрос. Двойной щелчок по результату откроет его в приватном браузере.')
         self.status.setObjectName('muted')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         actions = QHBoxLayout()
-        for text, callback in [('Отчёты', self.open_reports), ('Куда сохранять…', self.select_output), ('Мини-браузер', self.toggle_browser), ('Как искать', self.show_help)]:
+        for text, callback in [('Отчёты', self.open_reports), ('Куда сохранять…', self.select_output), ('Мини-браузер', self.toggle_browser), ('Как искать', self.show_help), ('Обновить', self.check_updates)]:
             button = QPushButton(text)
             button.clicked.connect(callback)
             actions.addWidget(button)
@@ -465,6 +544,10 @@ class SpiderWindow(QMainWindow):
         hint.setObjectName('eyebrow')
         actions.addWidget(hint)
         layout.addLayout(actions)
+        self.auto_update = QCheckBox('Автоматически проверять, устанавливать обновления и перезапускать приложение после поиска')
+        self.auto_update.setChecked(auto_updates_enabled())
+        self.auto_update.toggled.connect(self.change_auto_updates)
+        layout.addWidget(self.auto_update)
         self.browser = PrivateBrowser()
         self.dock = QDockWidget('ПРИВАТНЫЙ БРАУЗЕР  /  SPIDER', self)
         self.dock.setObjectName('privateBrowserDock')
@@ -476,6 +559,37 @@ class SpiderWindow(QMainWindow):
         self.browser.status.connect(self.browser_status)
         self.browser.completed.connect(self.browser_done)
         self.log_line('Система готова. Cookies и история браузера — только в памяти; отчёты сохраняются на диск.')
+
+    def change_auto_updates(self, enabled):
+        try:
+            set_auto_updates(enabled)
+        except OSError:
+            self.log_line('Не удалось сохранить настройку обновлений.')
+
+    def check_updates(self):
+        if self.update_thread and self.update_thread.isRunning():
+            return
+        self.update_thread = UpdateThread(self)
+        self.update_thread.result.connect(self.update_result)
+        self.update_thread.finished.connect(self.apply_pending_update)
+        self.update_thread.start()
+        self.log_line('Проверяю публичный релиз OST Finder…')
+
+    def update_result(self, message, staged):
+        self.log_line(message)
+        self.status.setText(message)
+        if staged:
+            self.pending_update = staged
+
+    def apply_pending_update(self):
+        if not self.pending_update or self.busy or (self.update_thread and self.update_thread.isRunning()):
+            return
+        try:
+            schedule_install(self.pending_update)
+            self.pending_update = None
+            self.close()
+        except OSError as error:
+            self.log_line('Не удалось запустить установку: ' + type(error).__name__)
 
     @staticmethod
     def metric(layout, caption, value):
@@ -503,7 +617,20 @@ class SpiderWindow(QMainWindow):
             self.query.setFocus()
             self.status.setText('Введите @ник, домен, email, IP или обычный поисковый запрос.')
             return
+        if self.context.text().strip():
+            query += ' | ' + self.context.text().strip()
+        try:
+            plan = parse_query(query)
+        except ValueError as error:
+            self.status.setText(str(error))
+            return
         self.current_query = query
+        self.quality = None
+        self.quality_started = False
+        self.quality_view.clear()
+        self.search_provider = ['', 'ollama', 'openrouter'][self.llm_provider.currentIndex()]
+        self.search_model = self.llm_model.text().strip()
+        self.should_save = self.save_enabled.isChecked()
         self.query_type = 'text'
         self.findings = {}
         self.errors = []
@@ -515,6 +642,9 @@ class SpiderWindow(QMainWindow):
         self.browser_finished = False
         self.search_button.setEnabled(False)
         self.query.setEnabled(False)
+        self.context.setEnabled(False)
+        self.llm_provider.setEnabled(False)
+        self.llm_model.setEnabled(False)
         self.limit.setEnabled(False)
         self.tree.setSortingEnabled(False)
         self.badge.setText('●  ПАУК ИЩЕТ')
@@ -532,12 +662,12 @@ class SpiderWindow(QMainWindow):
         self.thread.failed.connect(self.network_error)
         self.thread.finished.connect(self.maybe_finish)
         self.thread.start()
-        self.browser.start(query, self.limit.value())
+        self.browser.start(plan.target + (' ' + plan.context if plan.context else ''), self.limit.value())
 
     def add_findings(self, findings):
         for finding in findings:
             url = safe_web_url(finding.url)
-            key = (url.casefold(), finding.title.casefold())
+            key = (url, finding.title.casefold())
             if not url:
                 continue
             if key in self.findings:
@@ -589,26 +719,66 @@ class SpiderWindow(QMainWindow):
     def maybe_finish(self):
         if not self.busy or not self.network_finished or not self.browser_finished or (self.thread and self.thread.isRunning()):
             return
+        if not self.quality_started:
+            self.quality_started = True
+            self.status.setText('Проверяю совпадения, очищаю страницы и составляю сводку…')
+            self.quality_thread = QualityThread(self.current_query, list(self.findings.values()),
+                getattr(self, 'search_provider', ''), getattr(self, 'search_model', ''), self)
+            self.quality_thread.result.connect(self.quality_done)
+            self.quality_thread.finished.connect(self.maybe_finish)
+            self.quality_thread.start()
+            return
+        if self.quality is None or (self.quality_thread and self.quality_thread.isRunning()):
+            return
         self.busy = False
         self.browser.view.spider.set_active(False)
         self.elapsed.stop()
         self.tick()
         self.query.setEnabled(True)
+        self.context.setEnabled(True)
+        self.llm_provider.setEnabled(True)
+        self.llm_model.setEnabled(True)
         self.limit.setEnabled(True)
         self.search_button.setEnabled(True)
-        self.tree.setSortingEnabled(True)
+        self.tree.setSortingEnabled(False)
         self.badge.setText('●  ПОИСК ЗАВЕРШЁН')
         for error in self.errors:
             self.log_line('Недоступен источник: ' + error)
         try:
-            json_path, md_path = save_reports(self.current_query, self.query_type, list(self.findings.values()), self.errors, self.output)
-            self.log_line('JSON: ' + str(json_path.resolve()))
-            self.log_line('Markdown: ' + str(md_path.resolve()))
-            self.status.setText(f'Найдено {len(self.findings)} ссылок. Недоступных источников: {len(self.errors)}. Отчёты сохранены.')
+            if getattr(self, 'should_save', self.save_enabled.isChecked()):
+                json_path, md_path = save_reports(self.current_query, self.query_type, list(self.findings.values()), self.errors, self.output, self.quality)
+                self.log_line('JSON: ' + str(json_path.resolve()))
+                self.log_line('Markdown: ' + str(md_path.resolve()))
+                storage = 'Отчёты сохранены локально.'
+            else:
+                storage = 'Результаты только в памяти; отчёты не сохранены.'
+            self.status.setText(f'Найдено {len(self.quality["results"])} уникальных страниц. {storage}')
         except OSError as error:
             self.status.setText('Не удалось сохранить отчёт. Выберите другую папку кнопкой «Куда сохранять…».')
             self.log_line('Ошибка сохранения: ' + str(error))
         self.query.setFocus()
+        QTimer.singleShot(0, self.apply_pending_update)
+
+    def quality_done(self, quality):
+        self.quality = quality
+        self.quality_view.setHtml(html_report(quality))
+        self.tree.setSortingEnabled(False)
+        self.tree.clear()
+        for row in quality['results']:
+            if row['filtered']:
+                continue
+            item = QTreeWidgetItem([', '.join(row['sources']), f"[{row['evidence_score']}/100] {row['title']}", row['url']])
+            item.setData(0, Qt.ItemDataRole.UserRole, row['url'])
+            item.setToolTip(1, row['excerpt'] + '\n' + '\n'.join(row['warnings']))
+            item.setForeground(2, QColor('#65d6e8'))
+            self.tree.addTopLevelItem(item)
+        for row in quality['shortcuts']:
+            item = QTreeWidgetItem(['Search shortcut', row['title'], row['url']])
+            item.setData(0, Qt.ItemDataRole.UserRole, row['url'])
+            self.tree.addTopLevelItem(item)
+        self.log_line(f'Качество: {len(quality["results"])} страниц, объединено повторов: {quality["duplicates_merged"]}.')
+        if quality.get('llm_error'):
+            self.log_line('LLM-анализ недоступен: ' + quality['llm_error'] + '; локальная сводка готова.')
 
     def tick(self):
         elapsed = int(time.monotonic() - self.started)
@@ -652,6 +822,13 @@ class SpiderWindow(QMainWindow):
             'name@example.com — публичные упоминания\n'
             '8.8.8.8 — IP, RDAP, reverse DNS и urlscan\n'
             'Любая тема — поиск по открытым источникам\n\n'
+            'ФИО | компания город — поиск с контекстом против тёзок.\n'
+            'Контекст также можно ввести в отдельное поле под запросом.\n'
+            'Вкладка «Качество и сводка» — совпадения, выдержки, даты и расхождения.\n'
+            'Балл свидетельств не доказывает истинность или личность.\n'
+            'Без LLM ключи не нужны. Ollama/OpenRouter: один запрос, до 12 выдержек.\n'
+            'OpenRouter получает запрос и выдержки; ключ — OST_OPENROUTER_KEY.\n'
+            'Снимите «Сохранять отчёты», чтобы не записывать запрос и результаты.\n\n'
             'Двойной щелчок по результату — просмотр в приватном браузере.\n'
             'Двойной щелчок по заголовку браузера — отдельное маленькое окно.\n\n'
             'Паук собирает ссылки и сведения с двух найденных страниц.\n'
@@ -659,7 +836,7 @@ class SpiderWindow(QMainWindow):
             'Инкогнито не скрывает IP. Cookies не сохраняются, отчёты — сохраняются.')
 
     def closeEvent(self, event):
-        if self.busy:
+        if self.busy or (self.update_thread and self.update_thread.isRunning()):
             self.status.setText('Поиск ещё выполняется. После завершения окно можно закрыть.')
             event.ignore()
             return
@@ -672,7 +849,12 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--limit', type=int, default=5)
     parser.add_argument('--version', action='version', version='OST Finder Spider ' + APP_VERSION)
+    parser.add_argument('--no-auto-update', action='store_true')
+    parser.add_argument('--update-healthcheck', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.update_healthcheck:
+        from updater import healthcheck_gui
+        return healthcheck_gui()
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName('OST Finder Spider')
@@ -680,6 +862,8 @@ def main(argv=None):
     app.setFont(QFont('Segoe UI', 10))
     window = SpiderWindow(args.output, max(1, min(args.limit, 25)))
     window.show()
+    if getattr(sys, 'frozen', False) and not args.no_auto_update and auto_updates_enabled():
+        QTimer.singleShot(1500, window.check_updates)
     return app.exec()
 
 

@@ -20,10 +20,12 @@ from typing import Callable
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 import requests
+from search_transport import SearchSession, with_deadline
+from search_quality import analyse, parse_query, markdown as quality_markdown
 
 
 APP_NAME = "OST_find"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION} public-source research tool"
 DEFAULT_TIMEOUT = 12
 
@@ -83,7 +85,7 @@ def normalize_domain(query: str) -> str:
 
 
 def _session() -> requests.Session:
-    session = requests.Session()
+    session = SearchSession()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json, text/html;q=0.9"})
     return session
 
@@ -516,17 +518,51 @@ def search_links(query: str, query_type: str) -> list[Finding]:
     return links
 
 
+EXTRA_SOURCES: dict[str, Callable[[str, int], list[Finding]]] = {}
+
+
+def register_source(name: str, fetcher: Callable[[str, int], list[Finding]]) -> None:
+    """Extensions implement fetcher(query, limit), returning Finding objects."""
+    EXTRA_SOURCES[name] = fetcher
+
+
+def search_brave(query: str, limit: int) -> list[Finding]:
+    response = _session().get('https://api.search.brave.com/res/v1/web/search',
+        params={'q': query, 'count': min(limit, 20)},
+        headers={'X-Subscription-Token': os.environ['OST_BRAVE_KEY']}, timeout=DEFAULT_TIMEOUT)
+    response.raise_for_status()
+    return [Finding('Brave API', _clean_text(r.get('title', '')), normalize_result_url(r.get('url', '')),
+                    _clean_text(r.get('description', ''))[:800], 'search')
+            for r in response.json().get('web', {}).get('results', [])[:limit]]
+
+
+def search_wayback(query: str, limit: int) -> list[Finding]:
+    domain = normalize_domain(query)
+    response = _session().get('https://archive.org/wayback/available', params={'url': domain}, timeout=DEFAULT_TIMEOUT)
+    response.raise_for_status()
+    item = response.json().get('archived_snapshots', {}).get('closest', {})
+    if item.get('available') and item.get('url'):
+        return [Finding('Wayback Machine', 'Archived snapshot: ' + domain, item['url'],
+                        'Snapshot timestamp: ' + str(item.get('timestamp', '')), 'archive')]
+    return []
+
+
 def run_search(
     query: str,
     limit: int,
     console: Console | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
     findings_callback: Callable[[list[Finding]], None] | None = None,
+    time_budget: float = 20,
 ) -> tuple[str, list[Finding], list[str]]:
-    query_type = detect_query_type(query)
+    plan = parse_query(query)
+    query = plan.target + (' ' + plan.context if plan.context else '')
+    web_query = plan.operators[0] if re.fullmatch(r'[A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+){1,2}', plan.target) else query
+    deadline = time.monotonic() + time_budget
+    query_type = detect_query_type(plan.target)
     jobs: dict[str, Callable[[], list[Finding]]] = {
-        "DuckDuckGo": lambda: search_duckduckgo(query, limit),
-        "Bing": lambda: search_bing(query, limit),
+        "DuckDuckGo": lambda: search_duckduckgo(web_query, limit),
+        "Bing": lambda: search_bing(web_query, limit),
     }
     if query_type == "text":
         jobs.update(
@@ -546,22 +582,38 @@ def run_search(
         jobs["Hacker News"] = lambda: search_hacker_news(query, limit)
         jobs["Wikipedia"] = lambda: search_wikipedia(query, limit)
     if query_type == "domain":
-        jobs["Domain intelligence"] = lambda: search_domain_intel(query, limit)
-        jobs["urlscan.io"] = lambda: search_urlscan(query, query_type, limit)
+        jobs["Domain intelligence"] = lambda: search_domain_intel(plan.target, limit)
+        jobs["urlscan.io"] = lambda: search_urlscan(plan.target, query_type, limit)
     if query_type == "ip":
-        jobs["IP intelligence"] = lambda: search_ip_intel(query, limit)
-        jobs["urlscan.io"] = lambda: search_urlscan(query, query_type, limit)
+        jobs["IP intelligence"] = lambda: search_ip_intel(plan.target, limit)
+        jobs["urlscan.io"] = lambda: search_urlscan(plan.target, query_type, limit)
     if query_type == "email":
-        jobs["Public email profile"] = lambda: search_email_profile(query, limit)
+        jobs["Public email profile"] = lambda: search_email_profile(plan.target, limit)
+    if query_type == 'domain':
+        jobs['Wayback Machine'] = lambda: search_wayback(plan.target, limit)
+    if os.environ.get('OST_BRAVE_KEY'):
+        jobs['Brave API'] = lambda: search_brave(web_query, limit)
+    for name, fetcher in EXTRA_SOURCES.items():
+        jobs[name] = lambda fetcher=fetcher: fetcher(query, limit)
 
     findings = search_links(query, query_type)
+    findings.extend(Finding('Search shortcut', 'Уточнённый запрос: ' + operator,
+        'https://www.google.com/search?q=' + quote_plus(operator), category='shortcut') for operator in plan.operators)
+    findings.append(Finding('Search shortcut', 'Yandex: точный запрос',
+        'https://yandex.com/search/?text=' + quote_plus(plan.operators[0]), category='shortcut'))
     errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=min(7, len(jobs))) as pool:
-        pending = {pool.submit(job): name for name, job in jobs.items()}
+    pool = ThreadPoolExecutor(max_workers=min(10, len(jobs)))
+    try:
+        pending = {pool.submit(with_deadline, job, deadline): name for name, job in jobs.items()}
         completed = 0
         spinner = "|/-\\"
         frame = 0
         while pending:
+            if time.monotonic() >= deadline:
+                for future, name in pending.items():
+                    future.cancel()
+                    errors.append(name + ': time budget exceeded')
+                break
             done, _ = wait(pending, timeout=0.12, return_when=FIRST_COMPLETED)
             if not done:
                 if progress_callback:
@@ -582,22 +634,25 @@ def run_search(
                     if findings_callback:
                         findings_callback(source_findings)
                 except Exception as exc:  # network failures should not abort the report
-                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                    # Exception messages can contain query strings or proxy credentials.
+                    errors.append(f"{name}: {type(exc).__name__}")
                 completed += 1
                 if progress_callback:
                     progress_callback(f"Checked {name}", completed, len(jobs))
                 elif console:
                     builtins.print(f"\r✓ Checked {name} [{completed}/{len(jobs)}]".ljust(72))
             time.sleep(0.03)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     unique: dict[tuple[str, str], Finding] = {}
     for item in findings:
         if item.url:
-            unique[(item.url.casefold(), item.title.casefold())] = item
+            unique[(item.url, item.title.casefold())] = item
     return query_type, list(unique.values()), errors
 
 
-def save_reports(query: str, query_type: str, findings: list[Finding], errors: list[str], output_dir: Path) -> tuple[Path, Path]:
+def save_reports(query: str, query_type: str, findings: list[Finding], errors: list[str], output_dir: Path, quality=None) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     json_path = output_dir / f"ost_find_{stamp}.json"
@@ -610,6 +665,7 @@ def save_reports(query: str, query_type: str, findings: list[Finding], errors: l
         "query_type": query_type,
         "findings": [asdict(item) for item in findings],
         "errors": errors,
+        "quality": quality if quality is not None else analyse(query, findings),
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [
@@ -630,6 +686,7 @@ def save_reports(query: str, query_type: str, findings: list[Finding], errors: l
         lines.append("")
     if errors:
         lines.extend(["## Source errors", ""] + [f"- {error}" for error in errors] + [""])
+    lines.append(quality_markdown(payload['quality']))
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return json_path, md_path
 
@@ -657,6 +714,9 @@ def print_help(console: Console) -> None:
     console.print("  name@example.com      public web mentions and Gravatar")
     console.print("  8.8.8.8               RDAP, reverse DNS, urlscan and web mentions")
     console.print("  open source player    an ordinary topic across public web sources")
+    console.print('  Alice Smith | company city    context to distinguish namesakes')
+    console.print('  --no-save             keep results in memory; no local report files')
+    console.print('  --update              verify, install latest Windows build and restart')
     console.print("\nCommands: help, clear, exit")
     console.print("Only public sources are queried. Closed pages, leaked databases and authentication bypass are not used.\n")
 
@@ -668,17 +728,26 @@ def print_banner(console: Console) -> None:
     console.print("+" + "-" * 70 + "+")
 
 
-def execute_query(query: str, limit: int, output_dir: Path, console: Console) -> None:
+def execute_query(query: str, limit: int, output_dir: Path, console: Console, *, save=True, extract=True, llm='', model='') -> None:
     query_type, findings, errors = run_search(query, limit, console)
     display_findings(findings, console)
-    json_path, md_path = save_reports(query, query_type, findings, errors, output_dir)
-    console.print(f"\nSaved: {json_path.resolve()}")
-    console.print(f"Saved: {md_path.resolve()}")
+    quality = analyse(query, findings, extract=extract)
+    if llm:
+        from search_quality import llm_review
+        try:
+            quality['llm'] = llm_review(quality, llm, model)
+        except Exception as error:
+            errors.append('LLM: ' + type(error).__name__)
+    console.print(quality_markdown(quality))
+    if save:
+        json_path, md_path = save_reports(query, query_type, findings, errors, output_dir, quality)
+        console.print(f"\nSaved: {json_path.resolve()}")
+        console.print(f"Saved: {md_path.resolve()}")
     if errors:
         console.print(f"{len(errors)} source(s) were unavailable; details are in the report.")
 
 
-def interactive_loop(limit: int, output_dir: Path, console: Console) -> int:
+def interactive_loop(limit: int, output_dir: Path, console: Console, options=None) -> int:
     print_banner(console)
     console.dim("Hint: enter @username, example.com, email@example.com, an IP address or any topic. Type help for examples.")
     while True:
@@ -701,7 +770,7 @@ def interactive_loop(limit: int, output_dir: Path, console: Console) -> int:
         if not query:
             console.dim("Enter a search value or type help. The program stays open after every search.")
             continue
-        execute_query(query, limit, output_dir, console)
+        execute_query(query, limit, output_dir, console, **(options or {}))
 
 
 def launch_gui(limit: int, output_dir: Path) -> int:
@@ -881,18 +950,57 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-pause", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
+    parser.add_argument('--no-save', action='store_true', help='Keep query and results in memory only')
+    parser.add_argument('--no-extract', action='store_true', help='Skip fetching up to three public pages')
+    parser.add_argument('--llm', choices=['ollama', 'openrouter'], default='', help='Optional one-request evidence selection; sends excerpts to chosen provider')
+    parser.add_argument('--model', default='', help='Explicit model for optional LLM')
+    parser.add_argument('--update', action='store_true', help='Download, verify and install latest release, then restart')
+    parser.add_argument('--check-update', action='store_true', help='Check latest release without installing')
+    parser.add_argument('--no-auto-update', action='store_true', help='Disable startup updates for this run')
+    parser.add_argument('--update-healthcheck', action='store_true', help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.update_healthcheck:
+        return 0
+    from updater import check_release, stage_update, schedule_install, auto_updates_enabled
+    automatic = getattr(sys, 'frozen', False) and not args.no_auto_update and auto_updates_enabled()
+    if args.update or args.check_update or (automatic and not args.query):
+        try:
+            release = check_release(APP_VERSION, 'cli')
+            if release:
+                print('Available update: ' + release['version'])
+                if not args.check_update:
+                    staged = stage_update(release)
+                    schedule_install(staged)
+                    return 0
+            elif args.check_update or args.update:
+                print('Already up to date.')
+            if args.check_update or args.update:
+                return 0
+        except Exception as error:
+            print('Update unavailable: ' + type(error).__name__)
+            if args.update or args.check_update:
+                return 1
     output_dir = args.output or default_output_dir()
     limit = max(1, min(args.limit, 25))
     console = Console()
+    options = dict(save=not args.no_save, extract=not args.no_extract, llm=args.llm, model=args.model)
     if not args.query:
-        return interactive_loop(limit, output_dir, console)
+        return interactive_loop(limit, output_dir, console, options)
     print_banner(console)
-    execute_query(args.query, limit, output_dir, console)
+    execute_query(args.query, limit, output_dir, console, **options)
+    if automatic:
+        # Never discard a one-shot query just because a newer version exists.
+        try:
+            release = check_release(APP_VERSION, 'cli')
+            if release:
+                console.print('Installing update after completed search: ' + release['version'])
+                schedule_install(stage_update(release))
+        except Exception as error:
+            console.print('Update unavailable: ' + type(error).__name__)
     return 0
 
 

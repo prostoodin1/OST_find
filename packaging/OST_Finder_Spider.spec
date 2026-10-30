@@ -10,6 +10,7 @@ datas = [(str(root / 'licenses'), 'licenses'), (str(root / 'README.md'), '.'), (
 datas += copy_metadata('requests')
 datas += copy_metadata('PySide6')
 datas.append((str(root / 'browser_targets.js'), '.'))
+datas.append((str(root / 'update_helper.ps1'), '.'))
 a = Analysis([str(root / 'ost_spider.py')], pathex=[], binaries=[], datas=datas,
     hiddenimports=[], hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=[], noarchive=False, optimize=0)
@@ -35,4 +36,4 @@ portable = EXE(pyz, a.scripts, [], exclude_binaries=True,
 folder = COLLECT(portable, a.binaries, a.datas, strip=False, upx=False,
     upx_exclude=[], name='OST_Finder_Spider')
 standalone = EXE(pyz, a.scripts, a.binaries, a.datas, [],
-    name='OST_Finder_Spider_0.5.0_x64', **options)
+    name='OST_Finder_Spider_0.6.0_x64', **options)

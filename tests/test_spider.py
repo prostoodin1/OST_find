@@ -108,7 +108,10 @@ def test_invalid_dom_payload_and_stale_generation_are_ignored(app):
     browser.close()
 
 
-def test_window_keeps_two_searches_and_reports_independent(app, tmp_path):
+def test_window_keeps_two_searches_and_reports_independent(app, tmp_path, monkeypatch):
+    import ost_spider
+    from search_quality import analyse
+    monkeypatch.setattr(ost_spider, 'analyse', lambda query, findings, **kwargs: analyse(query, findings))
     window = SpiderWindow(output=tmp_path)
     for index in range(2):
         window.current_query = f'query-{index}'
@@ -117,16 +120,51 @@ def test_window_keeps_two_searches_and_reports_independent(app, tmp_path):
         window.findings.clear()
         window.tree.clear()
         window.busy = True
+        window.quality = None
+        window.quality_started = False
         window.network_finished = True
         window.browser_finished = True
         window.add_findings([Finding('Test', f'Result {index}', f'https://example.com/{index}')])
         window.maybe_finish()
+        wait_until(app, lambda: not window.busy)
         assert not window.busy
         assert window.search_button.isEnabled()
     reports = list(tmp_path.glob('*.json'))
     assert len(reports) == 2
     assert {json.loads(p.read_text(encoding='utf-8'))['query'] for p in reports} == {'query-0', 'query-1'}
     window.close()
+
+
+def test_no_save_mode_keeps_reports_off_disk(app, tmp_path, monkeypatch):
+    import ost_spider
+    from search_quality import analyse
+    monkeypatch.setattr(ost_spider, 'analyse', lambda query, findings, **kwargs: analyse(query, findings))
+    window = SpiderWindow(output=tmp_path)
+    window.current_query = 'privacy test'
+    window.query_type = 'text'
+    window.started = time.monotonic()
+    window.busy = window.network_finished = window.browser_finished = True
+    window.save_enabled.setChecked(False)
+    window.add_findings([Finding('Test', 'privacy test', 'https://example.com/privacy')])
+    window.maybe_finish()
+    wait_until(app, lambda: not window.busy)
+    assert not list(tmp_path.iterdir())
+    assert window.quality_view.toPlainText()
+    window.close()
+
+
+def test_update_waits_until_search_finishes(app, tmp_path, monkeypatch):
+    import ost_spider
+    calls = []
+    monkeypatch.setattr(ost_spider, 'schedule_install', calls.append)
+    window = SpiderWindow(output=tmp_path)
+    window.pending_update = tmp_path
+    window.busy = True
+    window.apply_pending_update()
+    assert calls == []
+    window.busy = False
+    window.apply_pending_update()
+    assert calls == [tmp_path] and window.pending_update is None
 
 
 def test_overlay_collects_only_after_contact_and_only_once(app):

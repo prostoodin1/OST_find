@@ -97,3 +97,16 @@ def test_interactive_loop_accepts_repeated_searches(monkeypatch, tmp_path: Path)
 
     assert interactive_loop(3, tmp_path, TestConsole()) == 0
     assert seen == ["first query", "second query"]
+
+
+def test_cli_completes_query_before_automatic_update(monkeypatch):
+    import updater
+    events = []
+    monkeypatch.setattr(ost_find.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(updater, 'auto_updates_enabled', lambda: True)
+    monkeypatch.setattr(updater, 'check_release', lambda *a: events.append('check') or {'version': '9.0.0'})
+    monkeypatch.setattr(updater, 'stage_update', lambda *a: events.append('stage') or Path('test'))
+    monkeypatch.setattr(updater, 'schedule_install', lambda *a: events.append('install'))
+    monkeypatch.setattr(ost_find, 'execute_query', lambda *a, **kw: events.append('query'))
+    assert ost_find.main(['--no-save', 'my query']) == 0
+    assert events == ['query', 'check', 'stage', 'install']

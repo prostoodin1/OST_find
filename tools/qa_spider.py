@@ -49,11 +49,18 @@ def watch():
         return
     summary.append({
         'query': window.current_query, 'findings': len(window.findings),
+        'elapsed_seconds': round(time.monotonic() - started, 2),
+        'quality_pages': len(window.quality['results']),
+        'extracted_pages': sum(bool(r['metadata']) for r in window.quality['results']),
+        'filtered_pages': sum(r.get('filtered', False) for r in window.quality['results']),
         'browser_findings': sum(f.category == 'browser' for f in window.findings.values()),
         'off_the_record': window.browser.profile.isOffTheRecord(),
         'reports_saved': len(list(args.output.glob('ost_find_*.json'))) >= len(summary) + 1,
         'errors': window.errors,
     })
+    window.tabs.setCurrentIndex(2)
+    args.output.mkdir(parents=True, exist_ok=True)
+    window.grab().save(str(args.output / f'quality-{len(summary)}.png'))
     QTimer.singleShot(500, start_next)
 
 
