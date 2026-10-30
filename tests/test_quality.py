@@ -110,3 +110,10 @@ def test_rich_report_escapes_untrusted_page_markup():
     rendered = quality.html_report(report)
     assert '<img' not in rendered and '<script' not in rendered
     assert '&lt;img' in rendered
+
+
+def test_username_prefix_and_sentence_punctuation_do_not_hide_matches():
+    report = analyse('@alice_dev', [Finding('GitHub', 'Alice', 'https://github.com/alice_dev')])
+    assert report['results'][0]['relevance'] == 100
+    assert not report['results'][0]['filtered']
+    assert quality.tokens('Python. @alice.dev') == {'python', 'alice.dev'}

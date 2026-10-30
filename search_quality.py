@@ -21,7 +21,8 @@ import requests
 
 
 def tokens(text):
-    return set(re.findall(r"[\w@.-]+", text.casefold(), re.UNICODE)) - {'the', 'and', 'or', 'и', 'в', 'на'}
+    words = {word.lstrip('@').strip('.-') for word in re.findall(r"[\w@.-]+", text.casefold(), re.UNICODE)}
+    return words - {'', 'the', 'and', 'or', 'и', 'в', 'на'}
 
 
 @dataclass
